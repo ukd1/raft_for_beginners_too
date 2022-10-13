@@ -1,6 +1,6 @@
-use std::{time::{Instant, Duration}, sync::{Arc, atomic::Ordering}, collections::HashMap};
+use std::{sync::{Arc, atomic::Ordering}, collections::HashMap};
 
-use tokio::time::sleep;
+use tokio::{time::{Instant, Duration}, sync::Mutex};
 use tokio::sync::mpsc::{Sender, Receiver};
 use tracing::trace;
 
@@ -22,6 +22,8 @@ impl Server<Follower> {
         tokio::spawn(async move {
             let mut follower = Self {
                 connection_h,
+                packets_in: Mutex::new(packets_receive_rx),
+                packets_out: packets_send_tx,
                 config,
                 term: 0.into(),
                 state: Follower {
@@ -55,17 +57,6 @@ impl Server<Follower> {
         }
     }
 
-    async fn incoming_loop(self: Arc<Self>) -> Result<()> {
-        let Follower { timeout, .. } = self.state;
-        let sleep_time = timeout - Instant::now();
-        #[allow(clippy::never_loop)] // For testing
-        loop {
-            sleep(sleep_time).await;
-            println!("Timeout elapsed");
-            break Ok(());
-        }
-    }
-
     async fn follow(self) -> Result<Server<Candidate>> {
         let current_term = self.term.load(Ordering::Acquire);
         println!("[Term {}] Follower started", current_term);
@@ -76,6 +67,8 @@ impl Server<Follower> {
         let election_timeout = Instant::now() + Duration::from_secs(5);
         let candidate = Server {
             connection_h: this.connection_h,
+            packets_in: this.packets_in,
+            packets_out: this.packets_out,
             config: this.config,
             term: this.term,
             state: Candidate {

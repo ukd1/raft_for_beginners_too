@@ -1,6 +1,6 @@
-use std::{sync::{atomic::Ordering, Arc}, time::{Instant, Duration}};
+use std::sync::{atomic::Ordering, Arc};
 
-use tokio::{task::JoinSet, time::sleep};
+use tokio::{task::JoinSet, time::{Instant, Duration}};
 
 use super::{Result, Server, state::{Leader, Follower}};
 
@@ -24,6 +24,8 @@ impl Server<Leader> {
         let follower_timeout = Instant::now() + Duration::from_secs(5);
         let follower = Server {
             connection_h: this.connection_h,
+            packets_in: this.packets_in,
+            packets_out: this.packets_out,
             config: this.config,
             term: this.term,
             state: Follower {
@@ -40,16 +42,6 @@ impl Server<Leader> {
         loop {
             println!("Leader heartbeat");
             ticker.tick().await;
-        }
-    }
-
-    async fn incoming_loop(self: Arc<Self>) -> Result<()> {
-        #[allow(clippy::never_loop)] // For testing
-        loop {
-            sleep(Duration::from_secs(5)).await;
-            self.term.fetch_add(1, Ordering::Release);
-            println!("Got (mock) other leader packet; Leader going back to follower");
-            break Ok(());
         }
     }
 }

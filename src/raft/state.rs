@@ -1,4 +1,5 @@
-use std::{collections::HashMap, time::Instant};
+use std::collections::HashMap;
+use tokio::time::Instant;
 
 #[derive(Debug)]
 pub struct Follower {
@@ -20,7 +21,31 @@ pub enum ElectionResult {
     Leader(super::Server<Leader>),
 }
 
-pub trait ServerState {}
-impl ServerState for Follower {}
-impl ServerState for Candidate {}
-impl ServerState for Leader {}
+pub trait ServerState {
+    fn get_timeout(&self) -> Option<Instant>;
+    fn set_timeout(&mut self, timeout: Instant);
+}
+impl ServerState for Follower {
+    fn get_timeout(&self) -> Option<Instant> {
+        Some(self.timeout)
+    }
+    fn set_timeout(&mut self, timeout: Instant) {
+        self.timeout = timeout;
+    }
+}
+impl ServerState for Candidate {
+    fn get_timeout(&self) -> Option<Instant> {
+        Some(self.timeout)
+    }
+    fn set_timeout(&mut self, timeout: Instant) {
+        self.timeout = timeout;
+    }
+}
+impl ServerState for Leader {
+    fn get_timeout(&self) -> Option<Instant> {
+        None
+    }
+    fn set_timeout(&mut self, _: Instant) {
+        unimplemented!("Leader doesn't have timeout");
+    }
+}

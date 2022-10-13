@@ -1,7 +1,7 @@
-use std::{time::{Instant, Duration}, sync::atomic::Ordering};
+use std::sync::atomic::Ordering;
 
+use tokio::time::{Instant, Duration};
 use crate::raft::state::{Leader, Follower};
-
 use super::{Result, Server, state::{Candidate, ElectionResult}};
 
 impl Server<Candidate> {
@@ -13,6 +13,8 @@ impl Server<Candidate> {
             println!("Won (mock) election");
             ElectionResult::Leader(Server {
                 connection_h: self.connection_h,
+                packets_in: self.packets_in,
+                packets_out: self.packets_out,
                 config: self.config,
                 term: self.term,
                 state: Leader,
@@ -22,6 +24,8 @@ impl Server<Candidate> {
             let follower_timeout = Instant::now() + Duration::from_secs(5);
             ElectionResult::Follower(Server {
                 connection_h: self.connection_h,
+                packets_in: self.packets_in,
+                packets_out: self.packets_out,
                 config: self.config,
                 term: self.term,
                 state: Follower {
