@@ -23,6 +23,7 @@ impl Server<Leader> {
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let follower_timeout = Instant::now() + Duration::from_secs(5);
         let follower = Server {
+            config: this.config,
             term: this.term,
             state: Follower {
                 timeout: follower_timeout,

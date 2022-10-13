@@ -6,10 +6,11 @@ use super::{Result, Server, state::{Follower, ElectionResult, Candidate}, Server
 
 
 impl Server<Follower> {
-    pub fn run() -> ServerHandle {
+    pub fn run(config: crate::config::Config) -> ServerHandle {
         let timeout = Instant::now() + Duration::from_secs(5);
         tokio::spawn(async move {
             let mut follower = Self {
+                config,
                 term: 0.into(),
                 state: Follower {
                     timeout,
@@ -46,6 +47,7 @@ impl Server<Follower> {
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let election_timeout = Instant::now() + Duration::from_secs(5);
         let candidate = Server {
+            config: this.config,
             term: this.term,
             state: Candidate {
                 votes: HashMap::new(),

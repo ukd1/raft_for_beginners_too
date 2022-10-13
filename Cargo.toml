@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.57"
+clap = { version = "3", features = ["derive"] }
 derive_more = "0.99.17"
 rand = "0.8.5"
 rmp-serde = "1.1.1"
@@ -14,3 +15,5 @@ serde = { version = "1.0.145", features = ["derive"] }
 thiserror = "1.0.37"
 tokio = { version = "1.21.2", features = ["full"] }
 tracing = "0.1.37"
+tracing-forest = "0.1.4"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }

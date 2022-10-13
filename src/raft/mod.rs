@@ -20,6 +20,7 @@ pub enum ServerError {
 
 #[derive(Debug)]
 pub struct Server<S: ServerState> {
+    config: crate::config::Config,
     pub state: S,
     pub term: AtomicU64,
 }

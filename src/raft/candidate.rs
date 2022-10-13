@@ -12,6 +12,7 @@ impl Server<Candidate> {
         let next_state = if won_election {
             println!("Won (mock) election");
             ElectionResult::Leader(Server {
+                config: self.config,
                 term: self.term,
                 state: Leader,
             })
@@ -19,6 +20,7 @@ impl Server<Candidate> {
             println!("Lost (mock) election");
             let follower_timeout = Instant::now() + Duration::from_secs(5);
             ElectionResult::Follower(Server {
+                config: self.config,
                 term: self.term,
                 state: Follower {
                     timeout: follower_timeout,
