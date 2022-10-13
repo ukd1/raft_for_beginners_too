@@ -4,6 +4,8 @@ use tokio::{time::sleep, task::{JoinSet, JoinHandle}};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
+    #[error(transparent)]
+    TaskPanicked(#[from] tokio::task::JoinError),
     #[error("unknown")]
     Unknown,
 }
@@ -45,7 +47,9 @@ mod state {
 
 use state::*;
 
-type ServerHandle = JoinHandle<Result<(), ServerError>>;
+type Result<T> = std::result::Result<T, ServerError>;
+type ServerHandle = JoinHandle<Result<()>>;
+
 impl Server<Follower> {
     fn run() -> ServerHandle {
         let timeout = Instant::now() + Duration::from_secs(5);
@@ -58,10 +62,10 @@ impl Server<Follower> {
                 },
             };
             loop {
-                let candidate = follower.follow().await;
-                follower = match candidate.poll_electors().await {
+                let candidate = follower.follow().await?;
+                follower = match candidate.poll_electors().await? {
                     ElectionResult::Leader(leader) => {
-                        leader.lead().await
+                        leader.lead().await?
                     },
                     ElectionResult::Follower(follower) => follower,
                 };
@@ -69,7 +73,7 @@ impl Server<Follower> {
         })
     }
 
-    async fn incoming_loop(self: Arc<Self>) -> Result<(), ServerError> {
+    async fn incoming_loop(self: Arc<Self>) -> Result<()> {
         let Follower { timeout, .. } = self.state;
         let sleep_time = timeout - Instant::now();
         #[allow(clippy::never_loop)] // For testing
@@ -80,30 +84,31 @@ impl Server<Follower> {
         }
     }
 
-    async fn follow(self) -> Server<Candidate>  {
+    async fn follow(self) -> Result<Server<Candidate>>  {
         let current_term = self.term.load(Ordering::Acquire);
         println!("[Term {}] Follower started", current_term);
         let this = Arc::new(self);
         let incoming_handle = tokio::spawn(Arc::clone(&this).incoming_loop());
-        incoming_handle.await.expect("TODO: handle JoinError").expect("TODO: handle error");
+        incoming_handle.await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let election_timeout = Instant::now() + Duration::from_secs(5);
-        Server {
+        let candidate = Server {
             term: this.term,
             state: Candidate {
                 votes: HashMap::new(),
                 timeout: election_timeout,
             },
-        }
+        };
+        Ok(candidate)
     }
 }
 
 impl Server<Candidate> {
-    async fn poll_electors(self) -> ElectionResult {
+    async fn poll_electors(self) -> Result<ElectionResult> {
         self.term.fetch_add(1, Ordering::Release);
         println!("Candidate started");
         let won_election = rand::random();
-        if won_election {
+        let next_state = if won_election {
             println!("Won (mock) election");
             ElectionResult::Leader(Server {
                 term: self.term,
@@ -119,29 +124,32 @@ impl Server<Candidate> {
                     voted_for: None,
                 },
             })
-        }
+        };
+        Ok(next_state)
     }
 }
 
 impl Server<Leader> {
-    async fn lead(self) -> Server<Follower> {
+    async fn lead(self) -> Result<Server<Follower>> {
         let current_term = self.term.load(Ordering::Acquire);
         let this = Arc::new(self);
         println!("[Term {}] Leader started", current_term);
         let mut tasks = JoinSet::new();
         tasks.spawn(Arc::clone(&this).heartbeat_loop());
         tasks.spawn(Arc::clone(&this).incoming_loop());
-        tasks.join_next().await.unwrap().expect("JoinError: task panicked").expect("TODO: handle task error");
+        tasks.join_next().await
+            .expect("tasks should not be empty")??;
         // A task exited without error, must be incoming_loop relinquishing Leader state, so...
         // Shut down heartbeat_loop
         tasks.shutdown().await;
 
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let follower_timeout = Instant::now() + Duration::from_secs(5);
-        Server { term: this.term, state: Follower { timeout: follower_timeout, voted_for: None } }
+        let follower = Server { term: this.term, state: Follower { timeout: follower_timeout, voted_for: None } };
+        Ok(follower)
     }
 
-    async fn heartbeat_loop(self: Arc<Self>) -> Result<(), ServerError> {
+    async fn heartbeat_loop(self: Arc<Self>) -> Result<()> {
         let heartbeat_interval = Duration::from_secs(1);
         let mut ticker = tokio::time::interval(heartbeat_interval);
         loop {
@@ -150,7 +158,7 @@ impl Server<Leader> {
         }
     }
 
-    async fn incoming_loop(self: Arc<Self>) -> Result<(), ServerError> {
+    async fn incoming_loop(self: Arc<Self>) -> Result<()> {
         #[allow(clippy::never_loop)] // For testing
         loop {
             sleep(Duration::from_secs(5)).await;
@@ -163,7 +171,7 @@ impl Server<Leader> {
 
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+async fn main() -> Result<()> {
     let server_handle = Server::run();
-    Ok(server_handle.await??)
+    server_handle.await?
 }
