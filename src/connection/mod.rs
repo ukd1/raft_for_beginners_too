@@ -32,8 +32,11 @@ pub enum PacketType {
 #[derive(Serialize, Deserialize, Clone, Debug, From, FromStr, Hash, PartialEq, Eq)]
 pub struct ServerAddress(pub SocketAddr); // TODO: make more generic?
 
-#[derive(Debug)]
-pub struct ConnectionError; // TODO
+#[derive(thiserror::Error, Debug)]
+pub enum ConnectionError {
+    #[error("Unknown")]
+    Unknown,
+}
 
 #[async_trait]
 pub trait Connection: Sized + Send + Sync + 'static {

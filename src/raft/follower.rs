@@ -1,15 +1,27 @@
 use std::{time::{Instant, Duration}, sync::{Arc, atomic::Ordering}, collections::HashMap};
 
 use tokio::time::sleep;
+use tokio::sync::mpsc::{Sender, Receiver};
+use tracing::trace;
+
+use crate::connection::{Connection, Packet};
 
 use super::{Result, Server, state::{Follower, ElectionResult, Candidate}, ServerHandle};
 
 
 impl Server<Follower> {
-    pub fn run(config: crate::config::Config) -> ServerHandle {
+    pub fn run(connection: impl Connection, config: crate::config::Config) -> ServerHandle {
         let timeout = Instant::now() + Duration::from_secs(5);
+
+        let (packets_receive_tx, packets_receive_rx) = tokio::sync::mpsc::channel(32);
+        let (packets_send_tx, packets_send_rx) = tokio::sync::mpsc::channel(32);
+
+        let connection_h = tokio::spawn(
+            Self::connection_loop(connection, packets_receive_tx, packets_send_rx)
+        );
         tokio::spawn(async move {
             let mut follower = Self {
+                connection_h,
                 config,
                 term: 0.into(),
                 state: Follower {
@@ -25,6 +37,22 @@ impl Server<Follower> {
                 };
             }
         })
+    }
+
+    async fn connection_loop(connection: impl Connection, incoming: Sender<Packet>, mut outgoing: Receiver<Packet>) -> Result<()> {
+        loop {
+            tokio::select! {
+                packet = connection.receive() => {
+                    let packet = packet?;
+                    trace!(?packet, "receive");
+                    //incoming.try_send(packet).expect("TODO: ConnectionError");
+                    let _ = incoming.send(packet).await; // DEBUG: try ignoring send errors
+                },
+                Some(packet) = outgoing.recv() => {
+                    connection.send(packet).await?;
+                },
+            }
+        }
     }
 
     async fn incoming_loop(self: Arc<Self>) -> Result<()> {
@@ -47,6 +75,7 @@ impl Server<Follower> {
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let election_timeout = Instant::now() + Duration::from_secs(5);
         let candidate = Server {
+            connection_h: this.connection_h,
             config: this.config,
             term: this.term,
             state: Candidate {

@@ -5,6 +5,8 @@ mod raft;
 use clap::Parser;
 
 use crate::config::Config;
+use crate::connection::Connection;
+use crate::connection::udp::UdpConnection;
 use crate::raft::{Result, Server};
 
 #[tokio::main]
@@ -30,6 +32,7 @@ async fn main() -> Result<()> {
     // assert_lesser_than!(opts.heartbeat_interval, opts.election_timeout_min);
     // assert_lesser_than!(opts.election_timeout_min, opts.election_timeout_max);
 
-    let server_handle = Server::run(opts);
+    let connection = UdpConnection::bind(opts.listen_socket.clone()).await.unwrap();
+    let server_handle = Server::run(connection, opts);
     server_handle.await?
 }
