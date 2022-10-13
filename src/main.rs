@@ -1,9 +1,11 @@
 use std::{time::{Instant, Duration}, collections::HashMap};
 
+use async_trait::async_trait;
 use typestate::typestate;
 
 #[typestate]
 mod raft {
+    use async_trait::async_trait;
     use std::{collections::HashMap, time::Instant};
 
     #[automaton]
@@ -16,9 +18,12 @@ mod raft {
         pub timeout: Instant,
         pub voted_for: Option<String>,
     }
+    #[async_trait]
     pub trait Follower {
+        // typestate macro needs this to return a named state, not Self
+        #[allow(clippy::new_ret_no_self)]
         fn new() -> Follower;
-        fn follow(self) -> Candidate;
+        async fn follow(self) -> Candidate;
         fn shutdown(self);
     }
 
@@ -27,15 +32,17 @@ mod raft {
         pub timeout: Instant,
         pub votes: HashMap<String, bool>,
     }
+    #[async_trait]
     pub trait Candidate {
-        fn poll_electors(self) -> ElectionResult;
+        async fn poll_electors(self) -> ElectionResult;
         fn shutdown(self);
     }
 
     #[state]
     pub struct Leader;
+    #[async_trait]
     pub trait Leader {
-        fn lead(self) -> Follower;
+        async fn lead(self) -> Follower;
         fn shutdown(self);
     }
 
@@ -47,6 +54,7 @@ mod raft {
 
 use raft::*;
 
+#[async_trait]
 impl FollowerState for Server<Follower> {
     fn new() -> Self {
         let timeout = Instant::now() + Duration::from_secs(5);
@@ -59,7 +67,7 @@ impl FollowerState for Server<Follower> {
         }
     }
 
-    fn follow(self) -> Server<Candidate>  {
+    async fn follow(self) -> Server<Candidate>  {
         println!("Follower started");
         let Follower { timeout, .. } = self.state;
         let sleep_time = timeout - Instant::now();
@@ -80,8 +88,9 @@ impl FollowerState for Server<Follower> {
     }
 }
 
+#[async_trait]
 impl CandidateState for Server<Candidate> {
-    fn poll_electors(mut self) -> ElectionResult {
+    async fn poll_electors(mut self) -> ElectionResult {
         self.term += 1;
         println!("Candidate started");
         println!("Won (mock) election");
@@ -96,8 +105,9 @@ impl CandidateState for Server<Candidate> {
     }
 }
 
+#[async_trait]
 impl LeaderState for Server<Leader> {
-    fn lead(mut self) -> Server<Follower>  {
+    async fn lead(mut self) -> Server<Follower>  {
         println!("Leader started");
         std::thread::sleep(Duration::from_secs(5));
         println!("Got (mock) other leader packet; Leader going back to follower");
@@ -111,13 +121,15 @@ impl LeaderState for Server<Leader> {
     }
 }
 
-fn main() {
+
+#[tokio::main]
+async fn main() {
     let mut follower = Server::new();
     loop {
-        let candidate = follower.follow();
-        follower = match candidate.poll_electors() {
+        let candidate = follower.follow().await;
+        follower = match candidate.poll_electors().await {
             ElectionResult::Leader(leader) => {
-                leader.lead()
+                leader.lead().await
             },
             ElectionResult::Follower(follower) => follower,
         };
