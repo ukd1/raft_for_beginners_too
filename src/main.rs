@@ -1,9 +1,12 @@
 use std::{sync::{Arc, atomic::{Ordering, AtomicU64}}, time::{Instant, Duration}, collections::HashMap};
 
-use tokio::{time::sleep, task::JoinSet};
+use tokio::{time::sleep, task::{JoinSet, JoinHandle}};
 
-#[derive(Debug)]
-pub struct ServerError;
+#[derive(thiserror::Error, Debug)]
+pub enum ServerError {
+    #[error("unknown")]
+    Unknown,
+}
 
 #[derive(Debug)]
 pub struct Server<S: ServerState> {
@@ -42,16 +45,28 @@ mod state {
 
 use state::*;
 
+type ServerHandle = JoinHandle<Result<(), ServerError>>;
 impl Server<Follower> {
-    fn new() -> Self {
+    fn run() -> ServerHandle {
         let timeout = Instant::now() + Duration::from_secs(5);
-        Self {
-            term: 0.into(),
-            state: Follower {
-                timeout,
-                voted_for: None,
-            },
-        }
+        tokio::spawn(async move {
+            let mut follower = Self {
+                term: 0.into(),
+                state: Follower {
+                    timeout,
+                    voted_for: None,
+                },
+            };
+            loop {
+                let candidate = follower.follow().await;
+                follower = match candidate.poll_electors().await {
+                    ElectionResult::Leader(leader) => {
+                        leader.lead().await
+                    },
+                    ElectionResult::Follower(follower) => follower,
+                };
+            }
+        })
     }
 
     async fn incoming_loop(self: Arc<Self>) -> Result<(), ServerError> {
@@ -148,15 +163,7 @@ impl Server<Leader> {
 
 
 #[tokio::main]
-async fn main() {
-    let mut follower = Server::new();
-    loop {
-        let candidate = follower.follow().await;
-        follower = match candidate.poll_electors().await {
-            ElectionResult::Leader(leader) => {
-                leader.lead().await
-            },
-            ElectionResult::Follower(follower) => follower,
-        };
-    }
+async fn main() -> Result<(), Box<dyn std::error::Error + 'static>> {
+    let server_handle = Server::run();
+    Ok(server_handle.await??)
 }
