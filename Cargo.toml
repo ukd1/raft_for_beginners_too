@@ -1,5 +1,5 @@
 [package]
-name = "typestate_test"
+name = "raft_for_beginners_too"
 version = "0.1.0"
 edition = "2021"
 
