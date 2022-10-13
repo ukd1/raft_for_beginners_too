@@ -1,3 +1,4 @@
+mod connection;
 mod raft;
 
 use raft::{Result, Server};
