@@ -1,6 +1,16 @@
-use std::{sync::{Arc, atomic::{Ordering, AtomicU64}}, time::{Instant, Duration}, collections::HashMap};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
+};
 
-use tokio::{time::sleep, task::{JoinSet, JoinHandle}};
+use tokio::{
+    task::{JoinHandle, JoinSet},
+    time::sleep,
+};
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
@@ -64,9 +74,7 @@ impl Server<Follower> {
             loop {
                 let candidate = follower.follow().await?;
                 follower = match candidate.poll_electors().await? {
-                    ElectionResult::Leader(leader) => {
-                        leader.lead().await?
-                    },
+                    ElectionResult::Leader(leader) => leader.lead().await?,
                     ElectionResult::Follower(follower) => follower,
                 };
             }
@@ -80,11 +88,11 @@ impl Server<Follower> {
         loop {
             sleep(sleep_time).await;
             println!("Timeout elapsed");
-            break Ok(())
+            break Ok(());
         }
     }
 
-    async fn follow(self) -> Result<Server<Candidate>>  {
+    async fn follow(self) -> Result<Server<Candidate>> {
         let current_term = self.term.load(Ordering::Acquire);
         println!("[Term {}] Follower started", current_term);
         let this = Arc::new(self);
@@ -137,7 +145,9 @@ impl Server<Leader> {
         let mut tasks = JoinSet::new();
         tasks.spawn(Arc::clone(&this).heartbeat_loop());
         tasks.spawn(Arc::clone(&this).incoming_loop());
-        tasks.join_next().await
+        tasks
+            .join_next()
+            .await
             .expect("tasks should not be empty")??;
         // A task exited without error, must be incoming_loop relinquishing Leader state, so...
         // Shut down heartbeat_loop
@@ -145,7 +155,13 @@ impl Server<Leader> {
 
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let follower_timeout = Instant::now() + Duration::from_secs(5);
-        let follower = Server { term: this.term, state: Follower { timeout: follower_timeout, voted_for: None } };
+        let follower = Server {
+            term: this.term,
+            state: Follower {
+                timeout: follower_timeout,
+                voted_for: None,
+            },
+        };
         Ok(follower)
     }
 
@@ -164,11 +180,10 @@ impl Server<Leader> {
             sleep(Duration::from_secs(5)).await;
             self.term.fetch_add(1, Ordering::Release);
             println!("Got (mock) other leader packet; Leader going back to follower");
-            break Ok(())
+            break Ok(());
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
