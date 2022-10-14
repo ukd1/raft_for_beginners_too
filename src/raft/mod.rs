@@ -7,13 +7,14 @@ use std::any::Any;
 use std::{result::Result as StdResult, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use async_trait::async_trait;
-use tokio::{task::JoinHandle, sync::{mpsc::{Receiver, Sender}, Mutex}, time::sleep_until};
+use rand::Rng;
+use tokio::task::JoinSet;
+use tokio::{task::JoinHandle, sync::{mpsc::{Receiver, Sender}, Mutex}, time::{Duration, Instant, sleep_until}};
 
 use state::ServerState;
-use tracing::info;
+use tracing::trace;
 
-use crate::connection::{ConnectionError, Packet};
+use crate::connection::{ConnectionError, Packet, Connection};
 
 use self::state::{Follower, Candidate, Leader};
 
@@ -30,7 +31,7 @@ pub enum ServerError {
 
 #[derive(Debug)]
 pub struct Server<S: ServerState> {
-    connection_h: JoinHandle<Result<()>>,
+    tasks: Mutex<JoinSet<Result<()>>>,
     packets_in: Mutex<Receiver<Packet>>,
     packets_out: Sender<Packet>,
     config: crate::config::Config,
@@ -44,8 +45,14 @@ enum ServerImpl<'s> {
     Leader(&'s Server<Leader>),
 }
 
+enum HandlePacketAction {
+    Reply(Packet),
+    NoReply,
+    StateTransition,
+}
+
 impl ServerImpl<'_> {
-    pub async fn handle_packet(&self, packet: Packet) -> Result<Option<Packet>> {
+    pub async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
             ServerImpl::Candidate(c) => c.handle_packet(packet).await,
@@ -63,6 +70,21 @@ impl ServerImpl<'_> {
 }
 
 impl<S: ServerState> Server<S> {
+     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
+        let min = min.as_millis() as u64;
+        let max = max.as_millis() as u64;
+        let new_timeout_millis = rand::thread_rng().gen_range(min..max);
+        Instant::now() + Duration::from_millis(new_timeout_millis)
+    }
+
+    /// get the timeout for a term; either when an election times out,
+    /// or timeout for followers not hearing from the leader
+    async fn reset_term_timeout(&self) {
+        // https://stackoverflow.com/questions/19671845/how-can-i-generate-a-random-number-within-a-range-in-rust
+        let new_timeout = Self::generate_random_timeout(self.config.election_timeout_min, self.config.election_timeout_max);
+        self.state.set_timeout(new_timeout);
+    }
+   
     async fn update_term(&self, packet: &Packet) -> StdResult<u64, ()> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
@@ -91,6 +113,22 @@ impl<S: ServerState> Server<S> {
         }
     }
 
+    async fn connection_loop(connection: impl Connection, incoming: Sender<Packet>, mut outgoing: Receiver<Packet>) -> Result<()> {
+        loop {
+            tokio::select! {
+                packet = connection.receive() => {
+                    let packet = packet?;
+                    trace!(?packet, "receive");
+                    //incoming.try_send(packet).expect("TODO: ConnectionError");
+                    let _ = incoming.send(packet).await; // DEBUG: try ignoring send errors
+                },
+                Some(packet) = outgoing.recv() => {
+                    connection.send(packet).await?;
+                },
+            }
+        }
+    }
+
     async fn incoming_loop(self: Arc<Self>) -> Result<()> {
         let timeout = self.state.get_timeout();
         let timeout = timeout.map(|t| sleep_until(t));
@@ -111,10 +149,14 @@ impl<S: ServerState> Server<S> {
                         }
                     }
 
-                    let reply = self.downcast().handle_packet(packet).await?;
-                    if let Some(reply_packet) = reply {
-                        outgoing.send(reply_packet).await
-                            .map_err(ConnectionError::from)?;
+                    let action = self.downcast().handle_packet(packet).await?;
+                    match action {
+                        HandlePacketAction::Reply(reply_packet) => {
+                            outgoing.send(reply_packet).await
+                                .map_err(ConnectionError::from)?
+                        },
+                        HandlePacketAction::NoReply => {},
+                        HandlePacketAction::StateTransition => return Ok(()),
                     }
 
                 },
