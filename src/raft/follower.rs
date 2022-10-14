@@ -8,8 +8,30 @@ use crate::connection::{Connection, Packet};
 
 use super::{Result, Server, state::{Follower, ElectionResult, Candidate}, ServerHandle};
 
-
 impl Server<Follower> {
+    pub async fn handle_packet(&self, packet: Packet) -> Result<Option<Packet>> {
+        use crate::connection::PacketType::*;
+
+        match packet.message_type {
+            VoteRequest { .. } => {
+                let reply = self.handle_voterequest(&packet).await;
+                Ok(Some(reply))
+            },
+            VoteResponse { .. } => {
+                self.handle_voteresponse(&packet).await;
+                Ok(None)
+            },
+            AppendEntries => {
+                let maybe_reply = self.handle_appendentries(&packet).await;
+                Ok(maybe_reply)
+            },
+            AppendEntriesAck { .. } => {
+                // TODO: commit in log
+                Ok(None)
+            },
+        }
+    }
+
     pub fn run(connection: impl Connection, config: crate::config::Config) -> ServerHandle {
         let timeout = Instant::now() + Duration::from_secs(5);
 

@@ -3,10 +3,11 @@ mod candidate;
 mod leader;
 mod state;
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::{result::Result as StdResult, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use async_trait::async_trait;
 use tokio::{task::JoinHandle, sync::{mpsc::{Receiver, Sender}, Mutex}, time::sleep_until};
 
 use state::ServerState;
@@ -37,6 +38,30 @@ pub struct Server<S: ServerState> {
     pub term: AtomicU64,
 }
 
+enum ServerImpl<'s> {
+    Follower(&'s Server<Follower>),
+    Candidate(&'s Server<Candidate>),
+    Leader(&'s Server<Leader>),
+}
+
+impl ServerImpl<'_> {
+    pub async fn handle_packet(&self, packet: Packet) -> Result<Option<Packet>> {
+        match self {
+            ServerImpl::Follower(f) => f.handle_packet(packet).await,
+            ServerImpl::Candidate(c) => c.handle_packet(packet).await,
+            ServerImpl::Leader(l) => l.handle_packet(packet).await,
+        }
+    }
+
+    pub async fn handle_timeout(&self) -> Result<()> {
+        match self {
+            ServerImpl::Follower(f) => f.handle_timeout().await,
+            ServerImpl::Candidate(c) => c.handle_timeout().await,
+            ServerImpl::Leader(_) => unimplemented!("No Leader timeout"),
+        }
+    }
+}
+
 impl<S: ServerState> Server<S> {
     async fn update_term(&self, packet: &Packet) -> StdResult<u64, ()> {
         let current_term = self.term.load(Ordering::Acquire);
@@ -45,6 +70,24 @@ impl<S: ServerState> Server<S> {
             Err(())
         } else {
             Ok(packet.term)
+        }
+    }
+
+    fn in_state<T: ServerState>(&self) -> bool {
+        (&self.state as &dyn Any).is::<T>()
+    }
+
+    fn downcast(&self) -> ServerImpl {
+        let dyn_self = self as &dyn Any;
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower>>() {
+            ServerImpl::Follower(follower)
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate>>() {
+            ServerImpl::Candidate(candidate)
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader>>() {
+            ServerImpl::Leader(leader)
+        } else {
+            let state_type = std::any::type_name::<S>();
+            unimplemented!("Invalid server state: {}", state_type);
         }
     }
 
@@ -57,38 +100,25 @@ impl<S: ServerState> Server<S> {
         loop {
             tokio::select! {
                 Some(packet) = incoming.recv() => {
-                    use crate::connection::PacketType::*;
-
                     if let Err(_) = self.update_term(&packet).await {
                         // Term from packet was greater than our term,
-                        // transition to follower
-                        if self.state.type_id() != TypeId::of::<Follower>() {
-                            return Ok(()); // TODO: Do this only for Candidate & Leader
+                        // transition to Follower
+                        if !self.in_state::<Follower>() {
+                            // Follower should not return and progress
+                            // to another state but remain a follower
+                            // in the new term
+                            return Ok(());
                         }
                     }
 
-                    match packet.message_type {
-                        VoteRequest { .. } => {
-                            let reply = self.handle_voterequest(&packet).await;
-                            outgoing.send(reply).await.unwrap(); // TODO
-                        },
-                        VoteResponse { .. } => {
-                            self.handle_voteresponse(&packet).await;
-                        },
-                        AppendEntries => {
-                            if let Some(reply) = self.handle_appendentries(&packet).await {
-                                outgoing.send(reply).await.unwrap(); // TODO
-                            }
-                        },
-                        AppendEntriesAck { .. } => {
-                            // TODO: commit in log
-                        },
+                    let reply = self.downcast().handle_packet(packet).await?;
+                    if let Some(reply_packet) = reply {
+                        outgoing.send(reply_packet).await
+                            .map_err(ConnectionError::from)?;
                     }
+
                 },
-                _ = timeout.unwrap(), if timeout.is_some() => {
-                    info!("Election timeout; restarting election");
-                    self.start_election().await
-                },
+                _ = timeout.unwrap(), if timeout.is_some() => self.downcast().handle_timeout().await,
                 else => return Ok(()),  // No more packets, shutting down
             }
         }
