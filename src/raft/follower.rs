@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use tokio::{sync::Mutex, task::JoinSet};
+use tokio::task::JoinSet;
 
 use tracing::info;
 
