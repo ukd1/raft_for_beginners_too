@@ -2,9 +2,21 @@ use std::sync::{atomic::Ordering, Arc};
 
 use tokio::time::Duration;
 
+use crate::{connection::{PacketType, Packet}, raft::HandlePacketAction};
+
 use super::{Result, Server, state::{Leader, Follower, Candidate}};
 
 impl Server<Leader> {
+    pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
+        use PacketType::*;
+
+        match packet.message_type {
+            AppendEntriesAck { .. } => Ok(HandlePacketAction::NoReply), // TODO: commit in log
+            // Leaders ignore these packets
+            AppendEntries | VoteRequest { .. } | VoteResponse { .. } => Ok(HandlePacketAction::NoReply),
+        }
+    }
+
     pub(super) async fn lead(self) -> Result<Server<Follower>> {
         let current_term = self.term.load(Ordering::Acquire);
         let this = Arc::new(self);
