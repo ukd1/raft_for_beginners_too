@@ -1,7 +1,7 @@
 use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{warn, info};
-use crate::{raft::state::Follower, connection::{Packet, PacketType}};
+use crate::{raft::state::Follower, connection::{Packet, PacketType, ConnectionError}};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction};
 
 impl Server<Candidate> {
@@ -51,13 +51,42 @@ impl Server<Candidate> {
         vote_cnt > (node_cnt / 2)
     }
 
+    async fn send_voterequest(self: Arc<Self>) -> Result<()> {
+        let current_term = self.term.load(Ordering::Acquire);
+
+        for peer in self.config.peers.iter() {
+            let current_term = self.term.load(Ordering::Acquire);
+            let peer_request = Packet {
+                message_type: PacketType::VoteRequest { last_log_index: 0, last_log_term: current_term - 1 }, // TODO: THIS IS THE WRONG TERM, it should come from the log and doesn't need the -1
+                term: current_term,
+                peer: peer.to_owned(),
+            };
+            self.packets_out.send(peer_request).await
+                .map_err(ConnectionError::from)?;
+        }
+
+        Ok(())
+    }
+
     pub(super) async fn start_election(self) -> Result<ElectionResult> {
         self.term.fetch_add(1, Ordering::Release);
         println!("Candidate started");
         let this = Arc::new(self);
-        // Loop on incoming packets until a successful exit,
-        // propagating any errors
-        tokio::spawn(Arc::clone(&this).incoming_loop()).await??;
+        {
+            let mut tasks = this.tasks.lock().await;
+            // Loop on incoming packets until a successful exit, and...
+            tasks.spawn(Arc::clone(&this).incoming_loop());
+            // ...send a voterequest packet to all peers, then...
+            tasks.spawn(Arc::clone(&this).send_voterequest());
+            // ...await task results. TODO: add timeout
+            while tasks.len() > 1 {
+                tasks
+                    .join_next()
+                    .await
+                    .expect("tasks should not be empty")??;
+            }
+            assert_eq!(tasks.len(), 1, "Only connect task should remain");
+        }
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let next_state = if this.has_won_election() {
             ElectionResult::Leader(this.into())
