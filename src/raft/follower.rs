@@ -4,9 +4,9 @@ use tracing::info;
 
 use crate::connection::{Connection, Packet, PacketType};
 
-use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, ServerHandle, HandlePacketAction, StateResult};
+use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, HandlePacketAction, StateResult, ServerHandle};
 
-impl Server<Follower> {
+impl<C: Connection> Server<Follower, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
         info!("Follower timeout");
         // Advance to Candidate state on timeout
@@ -64,7 +64,7 @@ impl Server<Follower> {
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn run(self, handoff_packet: Option<Packet>) -> StateResult<Server<Candidate>> {
+    async fn run(self, handoff_packet: Option<Packet>) -> StateResult<Server<Candidate, C>> {
         let current_term = self.term.load(Ordering::Acquire);
         info!(term = %current_term, "Follower started");
         let this = Arc::new(self);
@@ -72,20 +72,14 @@ impl Server<Follower> {
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).incoming_loop(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((Server::<Candidate>::from(this), packet_for_candidate))
+        Ok((Server::<Candidate, C>::from(this), packet_for_candidate))
     }
 
-    pub fn start(connection: impl Connection, config: crate::config::Config) -> ServerHandle {
-        let (packets_receive_tx, packets_receive_rx) = tokio::sync::mpsc::channel(32);
-        let (packets_send_tx, packets_send_rx) = tokio::sync::mpsc::channel(32);
-
-        let connection_h = tokio::spawn(Self::connection_loop(connection, packets_receive_tx, packets_send_rx));
+    pub fn start(connection: C, config: crate::config::Config) -> ServerHandle {
         let timeout = Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         tokio::spawn(async move {
             let mut follower = Self {
-                connection_h,
-                packets_in: packets_receive_rx.into(),
-                packets_out: packets_send_tx,
+                connection,
                 config,
                 term: 0.into(),
                 state: Follower::new(timeout),
@@ -103,13 +97,11 @@ impl Server<Follower> {
     }
 }
 
-impl From<Server<Candidate>> for Server<Follower> {
-    fn from(candidate: Server<Candidate>) -> Self {
+impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
+    fn from(candidate: Server<Candidate, C>) -> Self {
         let timeout = Self::generate_random_timeout(candidate.config.election_timeout_min, candidate.config.election_timeout_max);
         Self {
-            connection_h: candidate.connection_h,
-            packets_in: candidate.packets_in,
-            packets_out: candidate.packets_out,
+            connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
             state: Follower::new(timeout),
@@ -117,13 +109,11 @@ impl From<Server<Candidate>> for Server<Follower> {
     }
 }
 
-impl From<Server<Leader>> for Server<Follower> {
-    fn from(leader: Server<Leader>) -> Self {
+impl<C: Connection> From<Server<Leader, C>> for Server<Follower, C> {
+    fn from(leader: Server<Leader, C>) -> Self {
         let timeout = Self::generate_random_timeout(leader.config.election_timeout_min, leader.config.election_timeout_max);
         Self {
-            connection_h: leader.connection_h,
-            packets_in: leader.packets_in,
-            packets_out: leader.packets_out,
+            connection: leader.connection,
             config: leader.config,
             term: leader.term,
             state: Follower::new(timeout),

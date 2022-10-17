@@ -2,11 +2,11 @@ use std::sync::{atomic::Ordering, Arc};
 
 use tracing::info;
 
-use crate::{connection::{PacketType, Packet, ConnectionError}, raft::HandlePacketAction};
+use crate::{connection::{PacketType, Packet, ConnectionError, Connection}, raft::HandlePacketAction};
 
 use super::{Result, Server, state::{Leader, Follower, Candidate}, StateResult};
 
-impl Server<Leader> {
+impl<C: Connection> Server<Leader, C> {
     pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
         use PacketType::*;
 
@@ -17,7 +17,7 @@ impl Server<Leader> {
         }
     }
 
-    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower>> {
+    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower, C>> {
         let current_term = self.term.load(Ordering::Acquire);
         let this = Arc::new(self);
         info!(term = %current_term, "Leader started");
@@ -50,19 +50,17 @@ impl Server<Leader> {
                     peer: peer.to_owned(),
                     term: self.term.load(Ordering::Acquire),
                 };
-                self.packets_out.send(peer_request).await
+                self.connection.send(peer_request).await
                     .map_err(ConnectionError::from)?;
             }
         }
     }
 }
 
-impl From<Server<Candidate>> for Server<Leader> {
-    fn from(candidate: Server<Candidate>) -> Self {
+impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
+    fn from(candidate: Server<Candidate, C>) -> Self {
         Self {
-            connection_h: candidate.connection_h,
-            packets_in: candidate.packets_in,
-            packets_out: candidate.packets_out,
+            connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
             state: Leader {},

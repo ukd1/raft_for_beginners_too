@@ -1,10 +1,10 @@
 use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{warn, info, debug};
-use crate::{raft::state::Follower, connection::{Packet, PacketType, ConnectionError}};
+use crate::{raft::state::Follower, connection::{Packet, PacketType, ConnectionError, Connection}};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
 
-impl Server<Candidate> {
+impl<C: Connection> Server<Candidate, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
         info!("Candidate timeout");
         // Restart election and maintain state on timeout
@@ -77,14 +77,14 @@ impl Server<Candidate> {
                 term: current_term,
                 peer: peer.to_owned(),
             };
-            self.packets_out.send(peer_request).await
+            self.connection.send(peer_request).await
                 .map_err(ConnectionError::from)?;
         }
 
         Ok(())
     }
 
-    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<ElectionResult> {
+    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<ElectionResult<C>> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -105,12 +105,10 @@ impl Server<Candidate> {
     }
 }
 
-impl From<Server<Follower>> for Server<Candidate> {
-    fn from(follower: Server<Follower>) -> Self {
+impl<C: Connection> From<Server<Follower, C>> for Server<Candidate, C> {
+    fn from(follower: Server<Follower, C>) -> Self {
         Self {
-            connection_h: follower.connection_h,
-            packets_in: follower.packets_in,
-            packets_out: follower.packets_out,
+            connection: follower.connection,
             config: follower.config,
             term: follower.term,
             state: Candidate::from(follower.state),

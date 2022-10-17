@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::{RwLock, Mutex}, any::Any};
 use tokio::time::Instant;
 use tracing::debug;
 
-use crate::connection::ServerAddress;
+use crate::connection::{ServerAddress, Connection};
 
 use super::Server;
 
@@ -83,9 +83,9 @@ impl From<Follower> for Candidate {
 #[derive(Debug)]
 pub struct Leader;
 
-pub enum ElectionResult {
-    Follower(Server<Follower>),
-    Leader(Server<Leader>),
+pub enum ElectionResult<C: Connection> {
+    Follower(Server<Follower, C>),
+    Leader(Server<Leader, C>),
 }
 
 pub trait ServerState: Any + Send + Sync {

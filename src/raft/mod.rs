@@ -8,8 +8,8 @@ use std::{result::Result as StdResult, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::Rng;
-use tokio::{task::JoinHandle, sync::{mpsc::{Receiver, Sender}, Mutex}, time::{Duration, Instant, sleep_until}};
-use tracing::{trace, info};
+use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
+use tracing::info;
 
 use state::ServerState;
 
@@ -32,19 +32,17 @@ pub enum ServerError {
 }
 
 #[derive(Debug)]
-pub struct Server<S: ServerState> {
-    connection_h: ServerHandle,
-    packets_in: Mutex<Receiver<Packet>>,
-    packets_out: Sender<Packet>,
+pub struct Server<S: ServerState, C: Connection> {
+    connection: C,
     config: crate::config::Config,
     pub state: S,
     pub term: AtomicU64,
 }
 
-enum ServerImpl<'s> {
-    Follower(&'s Server<Follower>),
-    Candidate(&'s Server<Candidate>),
-    Leader(&'s Server<Leader>),
+enum ServerImpl<'s, C: Connection> {
+    Follower(&'s Server<Follower, C>),
+    Candidate(&'s Server<Candidate, C>),
+    Leader(&'s Server<Leader, C>),
 }
 
 pub(crate) enum HandlePacketAction {
@@ -52,7 +50,7 @@ pub(crate) enum HandlePacketAction {
     ChangeState(Option<Packet>),
 }
 
-impl ServerImpl<'_> {
+impl<C: Connection> ServerImpl<'_, C> {
     pub async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
@@ -70,7 +68,7 @@ impl ServerImpl<'_> {
     }
 }
 
-impl<S: ServerState> Server<S> {
+impl<S: ServerState, C: Connection> Server<S, C> {
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
         let min = min.as_millis() as u64;
         let max = max.as_millis() as u64;
@@ -107,32 +105,16 @@ impl<S: ServerState> Server<S> {
         dyn_state.is::<T>()
     }
 
-    fn downcast(&self) -> ServerImpl {
+    fn downcast(&self) -> ServerImpl<C> {
         let dyn_self = self as &dyn Any;
-        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower>>() {
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C>>() {
             ServerImpl::Follower(follower)
-        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate>>() {
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader, C>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state_name());
-        }
-    }
-
-    async fn connection_loop(connection: impl Connection, incoming: Sender<Packet>, mut outgoing: Receiver<Packet>) -> Result<()> {
-        loop {
-            tokio::select! {
-                packet = connection.receive() => {
-                    let packet = packet?;
-                    trace!(?packet, "receive");
-                    //incoming.try_send(packet).expect("TODO: ConnectionError");
-                    let _ = incoming.send(packet).await; // DEBUG: try ignoring send errors
-                },
-                Some(packet) = outgoing.recv() => {
-                    connection.send(packet).await?;
-                },
-            }
         }
     }
 
@@ -153,8 +135,6 @@ impl<S: ServerState> Server<S> {
 
     async fn incoming_loop(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
         use HandlePacketAction::*;
-
-        let mut incoming = self.packets_in.lock().await;
 
         if let Some(packet) = first_packet {
             // The following code is duplicated from the loop. If it
@@ -183,7 +163,7 @@ impl<S: ServerState> Server<S> {
             };
 
             let action = tokio::select! {
-                Some(packet) = incoming.recv() => self.handle_packet_generic(packet).await?,
+                result = self.connection.receive() => self.handle_packet_generic(result?).await?,
                 _ = timeout => self.downcast().handle_timeout().await?,
                 else => break Err(ServerError::ShuttingDown),  // No more packets, shutting down
             };
@@ -198,7 +178,7 @@ impl<S: ServerState> Server<S> {
     }
 
     async fn send(&self, packet: Packet) -> StdResult<(), ConnectionError> {
-        self.packets_out.send(packet).await?;
+        self.connection.send(packet).await?;
         Ok(())
     }
 }

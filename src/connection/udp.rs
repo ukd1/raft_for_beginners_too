@@ -4,6 +4,7 @@ use tokio::net::UdpSocket;
 
 use super::*;
 
+#[derive(Debug)]
 pub struct UdpConnection {
     socket: UdpSocket,
 }
