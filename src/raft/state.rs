@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::{RwLock, Mutex}, any::Any};
+use std::{collections::HashMap, sync::{RwLock, Mutex}, any::Any, fmt::{Debug, Display}};
 use tokio::time::Instant;
 use tracing::debug;
 
@@ -30,6 +30,12 @@ pub struct Follower {
     pub voted_for: Mutex<Ballot>,
 }
 
+impl Display for Follower {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Follower")
+    }
+}
+
 impl Follower {
     pub fn new(timeout: Instant) -> Self {
         Self {
@@ -43,6 +49,12 @@ impl Follower {
 pub struct Candidate {
     pub timeout: RwLock<Instant>,
     pub votes: ElectionTally,
+}
+
+impl Display for Candidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Candidate ({} votes)", self.votes.vote_count())
+    }
 }
 
 #[derive(Debug)]
@@ -83,12 +95,18 @@ impl From<Follower> for Candidate {
 #[derive(Debug)]
 pub struct Leader;
 
+impl Display for Leader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Leader")
+    }
+}
+
 pub enum ElectionResult<C: Connection> {
     Follower(Server<Follower, C>),
     Leader(Server<Leader, C>),
 }
 
-pub trait ServerState: Any + Send + Sync {
+pub trait ServerState: Debug + Display + Any + Send + Sync {
     fn get_timeout(&self) -> Option<Instant>;
     fn set_timeout(&self, timeout: Instant);
 }

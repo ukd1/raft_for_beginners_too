@@ -1,7 +1,5 @@
 use std::sync::{atomic::Ordering, Arc};
 
-use tracing::info;
-
 use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction};
 
 use super::{Result, Server, state::{Leader, Follower, Candidate}, StateResult};
@@ -18,12 +16,10 @@ impl<C: Connection> Server<Leader, C> {
     }
 
     pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower, C>> {
-        let current_term = self.term.load(Ordering::Acquire);
         let this = Arc::new(self);
-        info!(term = %current_term, "Leader started");
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
-        let incoming_loop_result = tokio::spawn(Arc::clone(&this).incoming_loop(next_packet)).await;
+        let incoming_loop_result = tokio::spawn(Arc::clone(&this).main(next_packet)).await;
         // 1. Shut down heartbeat_loop as soon as incoming_loop is done
         heartbeat_handle.abort();
         // 2. Raise any error from the incoming loop

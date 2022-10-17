@@ -8,6 +8,8 @@ use std::{result::Result as StdResult, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rand::Rng;
+use tokio::io::AsyncWriteExt;
+use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
 use tracing::info;
 
@@ -94,10 +96,6 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         }
     }
 
-    fn state_name(&self) -> &'static str {
-        std::any::type_name::<S>()
-    }
-
     fn in_state<T: ServerState>(&self) -> bool {
         let dyn_state = &self.state as &dyn Any;
         dyn_state.is::<T>()
@@ -112,7 +110,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader, C>>() {
             ServerImpl::Leader(leader)
         } else {
-            unimplemented!("Invalid server state: {}", self.state_name());
+            unimplemented!("Invalid server state: {}", self.state);
         }
     }
 
@@ -151,8 +149,13 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         Ok(action)
     }
 
-    async fn incoming_loop(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
+    async fn main(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
         use HandlePacketAction::*;
+
+        info!(state = %self.state, term = %self.term.load(Ordering::Relaxed), "state change");
+
+        let mut main_tasks = JoinSet::new();
+        main_tasks.spawn(Arc::clone(&self).signal_handler());
 
         if let Some(packet) = first_packet {
             // The following code is duplicated from the loop. If it
@@ -162,6 +165,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             let action = self.handle_packet_downcast(packet).await?;
             assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
             if let ChangeState(maybe_packet) = action {
+                main_tasks.shutdown().await;
                 return Ok(maybe_packet);
             }
         }
@@ -183,7 +187,31 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             };
             assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
             if let ChangeState(maybe_packet) = action {
-                break Ok(maybe_packet);
+                main_tasks.shutdown().await;
+                return Ok(maybe_packet);
+            }
+        }
+    }
+
+    async fn signal_handler(self: Arc<Self>) -> Result<()> {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut usr1_stream = signal(SignalKind::user_defined1()).expect("signal handling failed");
+
+        let mut status_interval = tokio::time::interval(Duration::from_secs(1));
+        let mut stdout = tokio::io::stdout();
+
+        loop {
+            tokio::select! {
+                _ = usr1_stream.recv() => {
+                    info!(state = %self.state, "SIGUSR1");
+                },
+                _ = status_interval.tick() => {
+                    let status_string = format!("\x1Bk{}\x1B", self.state);
+                    // println!("\x1Bk{:?}\x1B", *server_state);
+                    let _yeet = stdout.write_all(status_string.as_bytes()).await;
+                    let _yeet = stdout.flush().await;
+                }
             }
         }
     }

@@ -39,15 +39,15 @@ impl<C: Connection> Server<Candidate, C> {
         } else {
             unreachable!("handle_voteresponse called with a non-VoteResponse packet");
         };
-        info!(peer = ?packet.peer, term = ?packet.term, is_granted, "got a vote response");
+        debug!(peer = ?packet.peer, term = ?packet.term, is_granted, "got a vote response");
         self.state.votes.record_vote(&packet.peer, is_granted);
 
         if self.has_won_election() {
             info!(
-                term = ?self.term.load(Ordering::Acquire),
+                term = %self.term.load(Ordering::Acquire),
                 vote_cnt = %(self.state.votes.vote_count() + 1),
                 node_cnt = %(self.config.peers.len() + 1),
-                "won election; becoming Leader"
+                "won election"
             );
             Ok(HandlePacketAction::ChangeState(None))
         } else {
@@ -69,7 +69,7 @@ impl<C: Connection> Server<Candidate, C> {
     async fn start_election(&self) -> Result<()> {
         let current_term = self.term.fetch_add(1, Ordering::Release) + 1;
         self.reset_term_timeout().await;
-        info!(term = %current_term, "Candidate started");
+        info!(term = %current_term, "starting new election");
 
         for peer in self.config.peers.iter() {
             let peer_request = Packet {
@@ -87,7 +87,7 @@ impl<C: Connection> Server<Candidate, C> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
-            let loop_h = tokio::spawn(Arc::clone(&this).incoming_loop(next_packet));
+            let loop_h = tokio::spawn(Arc::clone(&this).main(next_packet));
             // ...send a voterequest packet to all peers, then...
             let this_election = Arc::clone(&this);
             tokio::spawn(async move { this_election.start_election().await }).await??; // TODO: add timeout

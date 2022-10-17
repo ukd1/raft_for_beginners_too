@@ -65,12 +65,10 @@ impl<C: Connection> Server<Follower, C> {
     }
 
     async fn run(self, handoff_packet: Option<Packet>) -> StateResult<Server<Candidate, C>> {
-        let current_term = self.term.load(Ordering::Acquire);
-        info!(term = %current_term, "Follower started");
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
-        let packet_for_candidate = tokio::spawn(Arc::clone(&this).incoming_loop(handoff_packet)).await??;
+        let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         Ok((Server::<Candidate, C>::from(this), packet_for_candidate))
     }
