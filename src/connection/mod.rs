@@ -35,8 +35,6 @@ pub struct ServerAddress(pub SocketAddr); // TODO: make more generic?
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConnectionError {
-    #[error("Programmer error: Sender dropped in connection handler")]
-    SenderDropped,
     #[error("Programmer error: Could not send packet to connection handler")]
     SendFailed(#[from] SendError<Packet>),
 }

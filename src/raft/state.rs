@@ -1,21 +1,40 @@
-use std::{collections::HashMap, sync::{RwLock, Mutex}};
+use std::{collections::HashMap, sync::{RwLock, Mutex}, any::Any};
 use tokio::time::Instant;
+use tracing::debug;
 
 use crate::connection::ServerAddress;
 
 use super::Server;
 
+#[derive(Debug, Default)]
+pub struct Ballot {
+    term: u64,
+    choice: Option<ServerAddress>,
+}
+
+impl Ballot {
+    pub fn cast_vote(&mut self, vote_term: u64, vote_choice: &ServerAddress) -> bool {
+        // If the term has changed or we haven't voted in this term
+        if self.term != vote_term || self.choice.is_none() {
+                self.term = vote_term;
+                self.choice = Some(vote_choice.clone());
+                return true;
+        }
+
+        self.choice.as_ref() == Some(vote_choice)
+    }
+}
 #[derive(Debug)]
 pub struct Follower {
     pub timeout: RwLock<Instant>,
-    pub voted_for: Mutex<Option<ServerAddress>>,
+    pub voted_for: Mutex<Ballot>,
 }
 
 impl Follower {
     pub fn new(timeout: Instant) -> Self {
         Self {
             timeout: RwLock::new(timeout),
-            voted_for: Mutex::new(None),
+            voted_for: Default::default(),
         }
     }
 }
@@ -27,7 +46,7 @@ pub struct Candidate {
 }
 
 #[derive(Debug)]
-struct ElectionTally {
+pub struct ElectionTally {
     votes: Mutex<HashMap<ServerAddress, bool>>,
 }
 
@@ -41,12 +60,14 @@ impl ElectionTally {
         let mut election_results = self.votes.lock().expect("votes Mutex poisoned");
 
         // store the result from the vote
+        debug!(peer = ?peer, ?is_granted, "vote recorded");
         election_results.insert(peer.to_owned(), is_granted);
     }
 
     pub fn vote_count(&self) -> usize {
         let election_results = self.votes.lock().expect("votes Mutex poisoned");
-        election_results.values().filter(|v| **v).count() + 1
+        debug!(votes = ?*election_results, "vote count");
+        election_results.values().filter(|v| **v).count()
     }
 }
 
@@ -67,7 +88,7 @@ pub enum ElectionResult {
     Leader(Server<Leader>),
 }
 
-pub trait ServerState: Send + Sync {
+pub trait ServerState: Any + Send + Sync {
     fn get_timeout(&self) -> Option<Instant>;
     fn set_timeout(&self, timeout: Instant);
 }

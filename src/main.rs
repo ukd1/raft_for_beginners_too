@@ -33,6 +33,6 @@ async fn main() -> Result<()> {
     // assert_lesser_than!(opts.election_timeout_min, opts.election_timeout_max);
 
     let connection = UdpConnection::bind(opts.listen_socket.clone()).await.unwrap();
-    let server_handle = Server::run(connection, opts);
+    let server_handle = Server::start(connection, opts);
     server_handle.await?
 }
