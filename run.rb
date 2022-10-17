@@ -1,7 +1,7 @@
 puts "cargo build --quiet"
 log_level = ENV.fetch('RUST_LOG', "info")
+number_of_peers = Integer(ENV.fetch("RAFT_TEST_PEERS", "3"))
 
-number_of_peers = 15
 peers = (0..number_of_peers-1).map {|i| 8000 + i}
 
 puts "tmux new-session -s raft_for_beginners_too -d"
