@@ -1,7 +1,7 @@
 use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{warn, info, debug};
-use crate::{raft::state::Follower, connection::{Packet, PacketType, ConnectionError, Connection}};
+use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
 
 impl<C: Connection> Server<Candidate, C> {
@@ -77,8 +77,7 @@ impl<C: Connection> Server<Candidate, C> {
                 term: current_term,
                 peer: peer.to_owned(),
             };
-            self.connection.send(peer_request).await
-                .map_err(ConnectionError::from)?;
+            self.connection.send(peer_request).await?;
         }
 
         Ok(())

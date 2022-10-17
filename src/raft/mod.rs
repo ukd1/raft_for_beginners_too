@@ -27,8 +27,6 @@ pub enum ServerError {
     ConnectionFailed(#[from] ConnectionError),
     #[error(transparent)]
     TaskPanicked(#[from] tokio::task::JoinError),
-    #[error("Server shutting down")]
-    ShuttingDown,
 }
 
 #[derive(Debug)]
@@ -118,7 +116,9 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         }
     }
 
-    async fn handle_packet_generic(&self, packet: Packet) -> Result<HandlePacketAction> {
+    async fn handle_packet_downcast(&self, packet: Packet) -> Result<HandlePacketAction> {
+        use HandlePacketAction::*;
+
         if let Err(_) = self.update_term(&packet).await {
             // Term from packet was greater than our term,
             // transition to Follower
@@ -126,11 +126,29 @@ impl<S: ServerState, C: Connection> Server<S, C> {
                 // A new term should trigger a state transition for Leaders
                 // and Candidates, but a Follower should remain a Follower
                 // in the new term
-                return Ok(HandlePacketAction::ChangeState(Some(packet)));
+                return Ok(ChangeState(Some(packet)));
             }
         }
 
-        self.downcast().handle_packet(packet).await
+        let mut action = self.downcast().handle_packet(packet).await?;
+        if let MaintainState(maybe_reply) = &mut action {
+            if let Some(reply) = maybe_reply.take() {
+                self.connection.send(reply).await?;
+            }
+        }
+        Ok(action)
+    }
+
+    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction> {
+        use HandlePacketAction::*;
+
+        let mut action = self.downcast().handle_timeout().await?;
+        if let MaintainState(maybe_reply) = &mut action {
+            if let Some(reply) = maybe_reply.take() {
+                self.connection.send(reply).await?;
+            }
+        }
+        Ok(action)
     }
 
     async fn incoming_loop(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
@@ -141,13 +159,10 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             // were not, then a check for first_packet would have to
             // be run in every loop iteration, every time a packet
             // is received--an unnecessary performance penalty.
-            let action = self.handle_packet_generic(packet).await?;
-            match action {
-                MaintainState(Some(reply)) => {
-                    self.send(reply).await?
-                },
-                MaintainState(None) => {},
-                ChangeState(maybe_packet) => return Ok(maybe_packet),
+            let action = self.handle_packet_downcast(packet).await?;
+            assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
+            if let ChangeState(maybe_packet) = action {
+                return Ok(maybe_packet);
             }
         }
 
@@ -163,22 +178,13 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             };
 
             let action = tokio::select! {
-                result = self.connection.receive() => self.handle_packet_generic(result?).await?,
-                _ = timeout => self.downcast().handle_timeout().await?,
-                else => break Err(ServerError::ShuttingDown),  // No more packets, shutting down
+                result = self.connection.receive() => self.handle_packet_downcast(result?).await?,
+                _ = timeout => self.handle_timeout_downcast().await?,
             };
-            match action {
-                MaintainState(Some(reply)) => {
-                    self.send(reply).await?
-                },
-                MaintainState(None) => {},
-                ChangeState(maybe_packet) => break Ok(maybe_packet),
+            assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
+            if let ChangeState(maybe_packet) = action {
+                break Ok(maybe_packet);
             }
         }
-    }
-
-    async fn send(&self, packet: Packet) -> StdResult<(), ConnectionError> {
-        self.connection.send(packet).await?;
-        Ok(())
     }
 }

@@ -2,7 +2,7 @@ use std::sync::{atomic::Ordering, Arc};
 
 use tracing::info;
 
-use crate::{connection::{PacketType, Packet, ConnectionError, Connection}, raft::HandlePacketAction};
+use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction};
 
 use super::{Result, Server, state::{Leader, Follower, Candidate}, StateResult};
 
@@ -50,8 +50,7 @@ impl<C: Connection> Server<Leader, C> {
                     peer: peer.to_owned(),
                     term: self.term.load(Ordering::Acquire),
                 };
-                self.connection.send(peer_request).await
-                    .map_err(ConnectionError::from)?;
+                self.connection.send(peer_request).await?;
             }
         }
     }
