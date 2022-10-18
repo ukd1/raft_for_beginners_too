@@ -1,8 +1,8 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::{sync::{atomic::Ordering, Arc}};
 
 use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction};
 
-use super::{Result, Server, state::{Leader, Follower, Candidate}, StateResult};
+use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult};
 
 impl<C: Connection> Server<Leader, C> {
     pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
@@ -11,7 +11,7 @@ impl<C: Connection> Server<Leader, C> {
         match packet.message_type {
             AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)), // TODO: commit in log
             // Leaders ignore these packets
-            AppendEntries | VoteRequest { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
+            AppendEntries { .. } | VoteRequest { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
         }
     }
 
@@ -41,8 +41,16 @@ impl<C: Connection> Server<Leader, C> {
         loop {
             ticker.tick().await;
             for peer in self.config.peers.iter() {
+                let peer_next_index = self.state.get_next_index(peer);
+                let peer_update = self.journal.get_update(peer_next_index);
+                let heartbeat = PacketType::AppendEntries {
+                    prev_log_index: peer_update.prev_index.try_into()?,
+                    prev_log_term: peer_update.prev_term,
+                    entries: peer_update.entries,
+                    leader_commit: peer_update.commit_index.try_into()?,
+                };
                 let peer_request = Packet {
-                    message_type: PacketType::AppendEntries,
+                    message_type: heartbeat,
                     peer: peer.to_owned(),
                     term: self.term.load(Ordering::Acquire),
                 };
@@ -54,12 +62,23 @@ impl<C: Connection> Server<Leader, C> {
 
 impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
     fn from(candidate: Server<Candidate, C>) -> Self {
+
+        // figure out match index
+        let index = candidate.journal.len();
+        let next_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), index)).collect();
+        let match_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), 0)).collect();
+
+
         Self {
             connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
+            journal: candidate.journal,
             span: tracing::Span::none().into(),
-            state: Leader {},
+            state: Leader {
+                next_index: next_index.into(),
+                match_index: match_index.into(),
+            },
         }
     }
 }

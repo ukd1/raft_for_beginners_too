@@ -18,7 +18,7 @@ impl<C: Connection> Server<Follower, C> {
 
         match packet.message_type {
             VoteRequest { .. } => self.handle_voterequest(&packet).await,
-            AppendEntries => self.handle_appendentries(&packet).await,
+            AppendEntries { .. } => self.handle_appendentries(&packet).await,
             // Followers ignore these packets
             AppendEntriesAck { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
         }
@@ -79,6 +79,7 @@ impl<C: Connection> Server<Follower, C> {
             let mut follower = Self {
                 connection,
                 config,
+                journal: Default::default(),
                 term: 0.into(),
                 span: tracing::Span::none().into(),
                 state: Follower::new(timeout),
@@ -103,6 +104,7 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
             connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
+            journal: candidate.journal,
             span: tracing::Span::none().into(),
             state: Follower::new(timeout),
         }
@@ -117,6 +119,7 @@ impl<C: Connection> From<Server<Leader, C>> for Server<Follower, C> {
             config: leader.config,
             term: leader.term,
             span: tracing::Span::none().into(),
+            journal: leader.journal,
             state: Follower::new(timeout),
         }
     }

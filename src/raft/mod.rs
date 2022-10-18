@@ -15,6 +15,7 @@ use tracing::info;
 
 use state::ServerState;
 
+use crate::journal::Journal;
 use crate::connection::{ConnectionError, Packet, Connection};
 
 use self::state::{Follower, Candidate, Leader};
@@ -29,12 +30,15 @@ pub enum ServerError {
     ConnectionFailed(#[from] ConnectionError),
     #[error(transparent)]
     TaskPanicked(#[from] tokio::task::JoinError),
+    #[error("could not convert native integer to wire size")]
+    IntegerOverflow(#[from] std::num::TryFromIntError),
 }
 
 #[derive(Debug)]
 pub struct Server<S: ServerState, C: Connection> {
     connection: C,
     config: crate::config::Config,
+    journal: Journal,
     pub state: S,
     pub term: AtomicU64,
     span: std::sync::Mutex<tracing::Span>,

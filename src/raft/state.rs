@@ -92,8 +92,29 @@ impl ElectionTally {
     }
 }
 
+pub type PeerIndices = HashMap<ServerAddress, usize>;
+
 #[derive(Debug)]
-pub struct Leader;
+pub struct Leader {
+    pub next_index: RwLock<PeerIndices>,
+    pub match_index: RwLock<PeerIndices>,
+}
+
+impl Leader {
+    pub fn get_next_index(&self, peer: &ServerAddress) -> usize {
+        self.next_index.read().expect("next_index lock poisoned")
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn get_match_index(&self, peer: &ServerAddress) -> usize {
+        self.match_index.read().expect("match_index lock poisoned")
+            .get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+}
 
 impl Display for Leader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

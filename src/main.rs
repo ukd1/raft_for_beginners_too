@@ -1,6 +1,7 @@
 mod config;
 mod connection;
 mod raft;
+mod journal;
 
 use clap::Parser;
 

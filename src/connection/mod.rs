@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use derive_more::{From, FromStr};
 use serde::{Serialize, Deserialize};
 
+use crate::journal::JournalEntry;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Packet {
     pub message_type: PacketType,
@@ -23,7 +24,12 @@ pub enum PacketType {
     VoteResponse {
         is_granted: bool,
     },
-    AppendEntries,
+    AppendEntries {
+        prev_log_index: u64,
+        prev_log_term: u64,
+        entries: Vec<JournalEntry>,
+        leader_commit: u64,
+    },
     AppendEntriesAck {
         did_append: bool,
     },

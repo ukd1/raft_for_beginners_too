@@ -23,7 +23,7 @@ impl<C: Connection> Server<Candidate, C> {
             }))),
             VoteResponse { .. } => self.handle_voteresponse(&packet).await,
             // Candidates ignore these packets
-            AppendEntries | AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)),
+            AppendEntries { .. } | AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)),
         }
     }
 
@@ -116,6 +116,7 @@ impl<C: Connection> From<Server<Follower, C>> for Server<Candidate, C> {
             config: follower.config,
             term: follower.term,
             span: tracing::Span::none().into(),
+            journal: follower.journal,
             state: Candidate::new(timeout),
         }
     }
