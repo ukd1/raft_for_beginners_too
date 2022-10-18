@@ -58,6 +58,7 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
             connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
+            span: tracing::Span::none().into(),
             state: Leader {},
         }
     }

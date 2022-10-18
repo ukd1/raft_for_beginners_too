@@ -51,6 +51,15 @@ pub struct Candidate {
     pub votes: ElectionTally,
 }
 
+impl Candidate {
+    pub fn new(timeout: Instant) -> Self {
+        Self {
+            timeout: timeout.into(),
+            votes: ElectionTally::new(),
+        }
+    }
+}
+
 impl Display for Candidate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Candidate ({} votes)", self.votes.vote_count())
@@ -80,15 +89,6 @@ impl ElectionTally {
         let election_results = self.votes.lock().expect("votes Mutex poisoned");
         debug!(votes = ?*election_results, "vote count");
         election_results.values().filter(|v| **v).count()
-    }
-}
-
-impl From<Follower> for Candidate {
-    fn from(follower: Follower) -> Self {
-        Self {
-            timeout: follower.timeout,
-            votes: ElectionTally::new(),
-        }
     }
 }
 

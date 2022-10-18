@@ -37,6 +37,7 @@ pub struct Server<S: ServerState, C: Connection> {
     config: crate::config::Config,
     pub state: S,
     pub term: AtomicU64,
+    span: std::sync::Mutex<tracing::Span>,
 }
 
 enum ServerImpl<'s, C: Connection> {
@@ -114,6 +115,12 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         }
     }
 
+    #[tracing::instrument(
+        level = tracing::Level::TRACE,
+        name = "handle_packet",
+        parent = self.span.try_lock()
+            .map_or_else(|_| tracing::Span::current(), |s| s.clone().or_current())
+    )]
     async fn handle_packet_downcast(&self, packet: Packet) -> Result<HandlePacketAction> {
         use HandlePacketAction::*;
 

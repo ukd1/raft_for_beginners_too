@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::connection::{Connection, Packet, PacketType};
 
@@ -8,7 +8,7 @@ use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}
 
 impl<C: Connection> Server<Follower, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
-        info!("Follower timeout");
+        warn!(term = %self.term.load(Ordering::Relaxed), "Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
     }
@@ -80,6 +80,7 @@ impl<C: Connection> Server<Follower, C> {
                 connection,
                 config,
                 term: 0.into(),
+                span: tracing::Span::none().into(),
                 state: Follower::new(timeout),
             };
             let mut packet = None;
@@ -102,6 +103,7 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
             connection: candidate.connection,
             config: candidate.config,
             term: candidate.term,
+            span: tracing::Span::none().into(),
             state: Follower::new(timeout),
         }
     }
@@ -114,6 +116,7 @@ impl<C: Connection> From<Server<Leader, C>> for Server<Follower, C> {
             connection: leader.connection,
             config: leader.config,
             term: leader.term,
+            span: tracing::Span::none().into(),
             state: Follower::new(timeout),
         }
     }

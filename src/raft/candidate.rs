@@ -6,7 +6,7 @@ use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketActi
 
 impl<C: Connection> Server<Candidate, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
-        info!("Candidate timeout");
+        warn!(term = %self.term.load(Ordering::Relaxed), "Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
         Ok(HandlePacketAction::MaintainState(None))
@@ -68,6 +68,10 @@ impl<C: Connection> Server<Candidate, C> {
 
     async fn start_election(&self) -> Result<()> {
         let current_term = self.term.fetch_add(1, Ordering::Release) + 1;
+        {
+            let mut current_span = self.span.lock().expect("span lock poisoned");
+            *current_span = tracing::info_span!("election", term = %current_term);
+        }
         self.reset_term_timeout().await;
         info!(term = %current_term, "starting new election");
 
@@ -106,11 +110,13 @@ impl<C: Connection> Server<Candidate, C> {
 
 impl<C: Connection> From<Server<Follower, C>> for Server<Candidate, C> {
     fn from(follower: Server<Follower, C>) -> Self {
+        let timeout = Self::generate_random_timeout(follower.config.election_timeout_min, follower.config.election_timeout_max);
         Self {
             connection: follower.connection,
             config: follower.config,
             term: follower.term,
-            state: Candidate::from(follower.state),
+            span: tracing::Span::none().into(),
+            state: Candidate::new(timeout),
         }
     }
 }

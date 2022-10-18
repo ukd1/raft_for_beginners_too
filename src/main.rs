@@ -15,14 +15,18 @@ async fn main() -> Result<()> {
         EnvFilter,
         prelude::*,
         filter::LevelFilter,
+        fmt,
     };
 
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy();
+    let fmt_layer = fmt::layer()
+        .with_ansi(true)
+        .with_timer(fmt::time::Uptime::default());
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_forest::ForestLayer::default())
+        .with(fmt_layer)
         .init();
 
     let opts = Config::parse();
