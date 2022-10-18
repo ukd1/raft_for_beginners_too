@@ -13,8 +13,7 @@ pub struct UdpConnection {
 impl Connection for UdpConnection {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
-        let socket = UdpSocket::bind(bind_socket.0).await
-            .expect("TODO: handle error");
+        let socket = UdpSocket::bind(bind_socket.0).await?;
         Ok(Self {
             socket,
         }) // TODO
@@ -23,15 +22,13 @@ impl Connection for UdpConnection {
     async fn send(&self, packet: Packet) -> Result<(), ConnectionError> {
         trace!(?packet, "send");
         let data = rmp_serde::to_vec(&packet).expect("serialization failed");
-        self.socket.send_to(&data, packet.peer.0).await
-            .expect("TODO: handle error");
+        self.socket.send_to(&data, packet.peer.0).await?;
         Ok(()) // TODO
     }
 
     async fn receive(&self) -> Result<Packet, ConnectionError> {
         let mut buf = vec![0; 65536];
-        let (bytes_received, peer_addr) = self.socket.recv_from(&mut buf).await
-            .expect("TODO: handle error");
+        let (bytes_received, peer_addr) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(bytes_received);
         trace!(?peer_addr, bytes_received, "receive"); // DEBUG
 

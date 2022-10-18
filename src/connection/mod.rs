@@ -5,7 +5,6 @@ use std::net::SocketAddr;
 use async_trait::async_trait;
 use derive_more::{From, FromStr};
 use serde::{Serialize, Deserialize};
-use tokio::sync::mpsc::error::SendError;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Packet {
@@ -35,8 +34,8 @@ pub struct ServerAddress(pub SocketAddr); // TODO: make more generic?
 
 #[derive(thiserror::Error, Debug)]
 pub enum ConnectionError {
-    #[error("Programmer error: Could not send packet to connection handler")]
-    SendFailed(#[from] SendError<Packet>),
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
 }
 
 #[async_trait]
