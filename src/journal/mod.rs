@@ -4,21 +4,48 @@ use serde::{Serialize, Deserialize};
 use tracing::warn;
 
 impl Journal {
-    pub fn append(&mut self, entry: JournalEntry) {
-        self.entries.write().expect("Journal lock was posioned").push(entry);
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry>> {
+        self.entries.read().expect("Journal lock was posioned")
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<JournalEntry>> {
+        self.entries.write().expect("Journal lock was posioned")
+    }
+
+    pub fn append_entry(&self, entry: JournalEntry) {
+        self.write().push(entry);
+    }
+
+    pub fn append(&self, term: u64, cmd: String) {
+        let mut entries = self.write();
+        let next_index = entries.len().try_into().expect("Journal entries length overflowed entry.index field");
+        let entry = crate::journal::JournalEntry {
+            term,
+            index: next_index,
+            cmd,
+        };
+        entries.push(entry);
+    }
+
+    pub fn truncate(&self, index: usize) {
+        self.write().truncate(index);
     }
 
     pub fn get(&self, index: usize) -> Option<JournalEntry> {
-        self.entries.read().expect("Journal lock was posioned").get(index).cloned()
+        self.read().get(index).cloned()
     }
 
     // lastApplied
     pub fn len(&self) -> usize {
-        self.entries.read().expect("Journal lock was posioned").len()
+        self.read().len()
+    }
+
+    pub fn last(&self) -> Option<JournalEntry> {
+        self.read().last().cloned()
     }
 
     pub fn get_update(&self, index: usize) -> JournalUpdate {
-        let entries = self.entries.read().expect("Journal lock was posioned");
+        let entries = self.read();
 
         let len = entries.len();
         let index = if index > len {
@@ -38,6 +65,9 @@ impl Journal {
         let update_entries: Vec<_> = entries.get(index..len)
             .expect("checked bounds above")
             .into();
+
+        tracing::info!(%index, %len, %prev_index, %prev_term, ?entries, "journal update");
+
         JournalUpdate {
             prev_term,
             prev_index,
@@ -51,7 +81,7 @@ impl Journal {
 #[derive(Debug)]
 pub struct Journal {
     entries: RwLock<Vec<JournalEntry>>,
-    commit_index: AtomicUsize,
+    pub commit_index: AtomicUsize,
 }
 
 impl Default for Journal {
@@ -65,13 +95,14 @@ impl Default for Journal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry {
-    term: u64,
-    cmd: String,
+    pub term: u64, // TODO make these a u32
+    pub index: u64, // TODO make these a u32
+    pub cmd: String,
 }   
 
 pub struct JournalUpdate {
-    pub prev_term: u64,
-    pub prev_index: usize,
+    pub prev_term: u64, // TODO make these a u32
+    pub prev_index: usize, // TODO make these a u32
     pub entries: Vec<JournalEntry>,
-    pub commit_index: usize,
+    pub commit_index: usize, // TODO make these a u32
 }

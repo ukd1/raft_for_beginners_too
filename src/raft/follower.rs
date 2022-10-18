@@ -46,19 +46,63 @@ impl<C: Connection> Server<Follower, C> {
 
     async fn handle_appendentries(&self, packet: &Packet) -> Result<HandlePacketAction> {
         let current_term = self.term.load(Ordering::Acquire);
-        let ack = packet.term == current_term;
 
-        if ack {
+        let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
+            PacketType::AppendEntries { prev_log_index, prev_log_term, entries, leader_commit} => (
+                (*prev_log_index).try_into()?, prev_log_term, entries, leader_commit
+            ),
+            _ => unreachable!("handle_appendentries called with non-PacketType::AppendEntries"),
+        };
+        let ack = if packet.term != current_term {
+            // Packet term is too old
+            false
+        } else if prev_log_index == 0 {
+            true
+        } else if let Some(entry) = self.journal.get(prev_log_index) {
+            entry.term == *prev_log_term
+        } else {
+            false
+        };
+
+        let match_index = if ack {
+            for entry in entries {
+                let entry_index = entry.index.try_into()?;
+                if let Some(existing_entry) = self.journal.get(entry_index) {
+                    // 3. If an existing entry conflicts with a new one (same index but different terms)
+                    if existing_entry.term != entry.term {
+                        // delete all delete the existing entry and all that follow it (§5.3)
+                        self.journal.truncate(entry_index);
+                        warn!(last_index = %entry_index, "truncated journal");
+                        break;
+                    }
+                } else {
+                    // 4. Append any new entries not already in the logs
+                    self.journal.append_entry(entry.to_owned());
+                    info!(index = %entry_index, "appended entry to journal");
+                }
+            }
+
+            // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+            let commit_index = self.journal.commit_index.load(Ordering::Acquire).try_into()?;
+            let last_entry_index = self.journal.last().map_or(0, |e| e.index);
+            if *leader_commit > commit_index {
+                let commit_index = std::cmp::min(*leader_commit, last_entry_index);
+                self.journal.commit_index.store(commit_index.try_into()?, Ordering::Release);
+            }
+
             self.reset_term_timeout().await;
-        }
-
-        if ack {
-            // TODO: append to log
-        }
+            Some(last_entry_index)
+        } else {
+            None
+        };
 
         let reply = Packet {
-            message_type: PacketType::AppendEntriesAck { did_append: ack },
+            message_type: PacketType::AppendEntriesAck {
+                did_append: ack,
+                match_index,
+            },
             term: current_term,
+            
             peer: packet.peer.clone(),
         };
         Ok(HandlePacketAction::MaintainState(Some(reply)))

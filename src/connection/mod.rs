@@ -32,6 +32,7 @@ pub enum PacketType {
     },
     AppendEntriesAck {
         did_append: bool,
+        match_index: Option<u64>,
     },
 }
 

@@ -15,13 +15,31 @@ impl<C: Connection> Server<Leader, C> {
         }
     }
 
+    // TODO: this should take a Packet with PacketType::ClientRequest
+    async fn handle_clientrequest(&self, cmd: String) {
+        let current_term = self.term.load(Ordering::SeqCst);
+        self.journal.append(current_term, cmd);
+    }
+
     pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower, C>> {
         let this = Arc::new(self);
 
+        let test_request_handle = {
+            let this_test_request = Arc::clone(&this);
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    let now = ticker.tick().await;
+                    this_test_request.handle_clientrequest(format!("{:?}", now)).await;
+                    tracing::info!(len = ?this_test_request.journal.len(), "test request added to journal");
+                }
+            })
+        }; // DEBUG
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
         let incoming_loop_result = tokio::spawn(Arc::clone(&this).main(next_packet)).await;
         // 1. Shut down heartbeat_loop as soon as incoming_loop is done
         heartbeat_handle.abort();
+        test_request_handle.abort(); // DEBUG
         // 2. Raise any error from the incoming loop
         let packet_for_next_state = incoming_loop_result??;
         // 3. incoming_loop exited without error, so wait for
