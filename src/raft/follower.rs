@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::Ordering};
 
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 use crate::connection::{Connection, Packet, PacketType};
 
@@ -49,7 +49,7 @@ impl<C: Connection> Server<Follower, C> {
 
         let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
             PacketType::AppendEntries { prev_log_index, prev_log_term, entries, leader_commit} => (
-                (*prev_log_index).try_into()?, prev_log_term, entries, leader_commit
+                *prev_log_index, prev_log_term, entries, leader_commit
             ),
             _ => unreachable!("handle_appendentries called with non-PacketType::AppendEntries"),
         };
@@ -65,8 +65,8 @@ impl<C: Connection> Server<Follower, C> {
         };
 
         let match_index = if ack {
-            for entry in entries {
-                let entry_index = entry.index.try_into()?;
+            for (i, entry) in entries.iter().enumerate() {
+                let entry_index = prev_log_index + (i as u64);
                 if let Some(existing_entry) = self.journal.get(entry_index) {
                     // 3. If an existing entry conflicts with a new one (same index but different terms)
                     if existing_entry.term != entry.term {
@@ -78,13 +78,13 @@ impl<C: Connection> Server<Follower, C> {
                 } else {
                     // 4. Append any new entries not already in the logs
                     self.journal.append_entry(entry.to_owned());
-                    info!(index = %entry_index, "appended entry to journal");
+                    debug!(index = %entry_index, "appended entry to journal");
                 }
             }
 
             // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
             let commit_index = self.journal.commit_index.load(Ordering::Acquire).try_into()?;
-            let last_entry_index = self.journal.last().map_or(0, |e| e.index);
+            let last_entry_index = self.journal.last_index();
             if *leader_commit > commit_index {
                 let commit_index = std::cmp::min(*leader_commit, last_entry_index);
                 self.journal.commit_index.store(commit_index.try_into()?, Ordering::Release);

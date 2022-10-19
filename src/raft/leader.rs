@@ -1,4 +1,6 @@
-use std::{sync::{atomic::Ordering, Arc}};
+use std::{sync::{atomic::Ordering, Arc}, collections::HashMap};
+
+use tokio::time::timeout;
 
 use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction};
 
@@ -9,7 +11,7 @@ impl<C: Connection> Server<Leader, C> {
         use PacketType::*;
 
         match packet.message_type {
-            AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)), // TODO: commit in log
+            AppendEntriesAck { .. } => self.handle_appendentriesack(&packet).await,
             // Leaders ignore these packets
             AppendEntries { .. } | VoteRequest { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
         }
@@ -21,17 +23,39 @@ impl<C: Connection> Server<Leader, C> {
         self.journal.append(current_term, cmd);
     }
 
+    async fn handle_appendentriesack(&self, packet: &Packet) -> Result<HandlePacketAction> {
+        // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
+        // removing did_append and using Some/None as the boolean
+        match packet.message_type {
+            PacketType::AppendEntriesAck { did_append, .. } if !did_append => {
+                self.state.next_index.decrement(&packet.peer);
+            },
+            PacketType::AppendEntriesAck { match_index: Some(mi), .. } => {
+                self.state.next_index.set(&packet.peer, mi + 1);
+                self.state.match_index.set(&packet.peer, mi);
+                if mi > self.state
+                let quorum_index = self.state.match_index.greatest_quorum_index();
+
+            },
+            _ => unreachable!("handle_appendentriesack called with non-AppendEntriesAck packet"),
+        }
+
+        Ok(HandlePacketAction::MaintainState(None))
+    }
+
     pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower, C>> {
         let this = Arc::new(self);
 
         let test_request_handle = {
             let this_test_request = Arc::clone(&this);
             tokio::spawn(async move {
+                let mut i = 0;
                 let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
                 loop {
-                    let now = ticker.tick().await;
-                    this_test_request.handle_clientrequest(format!("{:?}", now)).await;
-                    tracing::info!(len = ?this_test_request.journal.len(), "test request added to journal");
+                    i += 1;
+                    ticker.tick().await;
+                    this_test_request.handle_clientrequest(format!("{}", i)).await;
+                    tracing::info!(%i, last_index = %this_test_request.journal.last_index(), "test request added to journal");
                 }
             })
         }; // DEBUG
@@ -55,16 +79,22 @@ impl<C: Connection> Server<Leader, C> {
 
     async fn heartbeat_loop(self: Arc<Self>) -> Result<()> {
         let heartbeat_interval = self.config.heartbeat_interval;
-        let mut ticker = tokio::time::interval(heartbeat_interval);
+        let mut journal_changes = self.journal.subscribe();
+        let mut update_cache = HashMap::with_capacity(self.config.peers.len());
         loop {
-            ticker.tick().await;
+            update_cache.clear();
+            if let Ok(Err(_)) = timeout(heartbeat_interval, journal_changes.changed()).await {
+                panic!("journal_changes sender dropped");
+            }
             for peer in self.config.peers.iter() {
-                let peer_next_index = self.state.get_next_index(peer);
-                let peer_update = self.journal.get_update(peer_next_index);
+                let peer_next_index = self.state.next_index.get(peer);
+                // let peer_update = self.journal.get_update(peer_next_index);
+                let peer_update = update_cache.entry(peer_next_index)
+                    .or_insert_with(|| self.journal.get_update(peer_next_index));
                 let heartbeat = PacketType::AppendEntries {
                     prev_log_index: peer_update.prev_index.try_into()?,
                     prev_log_term: peer_update.prev_term,
-                    entries: peer_update.entries,
+                    entries: peer_update.entries.clone(),
                     leader_commit: peer_update.commit_index.try_into()?,
                 };
                 let peer_request = Packet {
@@ -82,8 +112,8 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
     fn from(candidate: Server<Candidate, C>) -> Self {
 
         // figure out match index
-        let index = candidate.journal.len();
-        let next_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), index)).collect();
+        let journal_next_index = candidate.journal.last_index() + 1;
+        let next_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), journal_next_index)).collect();
         let match_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), 0)).collect();
 
 

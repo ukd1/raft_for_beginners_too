@@ -218,7 +218,9 @@ impl<S: ServerState, C: Connection> Server<S, C> {
                     info!(state = %self.state, "SIGUSR1");
                 },
                 _ = status_interval.tick() => {
-                    let status_string = format!("\x1Bk{}\x1B", self.state);
+                    let term = self.term.load(Ordering::Relaxed);
+                    let last_index = self.journal.last_index().saturating_sub(1);
+                    let status_string = format!("\x1Bk{}[t{},i{}]\x1B", self.state, term, last_index);
                     // println!("\x1Bk{:?}\x1B", *server_state);
                     let _yeet = stdout.write_all(status_string.as_bytes()).await;
                     let _yeet = stdout.flush().await;

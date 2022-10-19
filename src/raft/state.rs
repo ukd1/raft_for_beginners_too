@@ -92,28 +92,65 @@ impl ElectionTally {
     }
 }
 
-pub type PeerIndices = HashMap<ServerAddress, usize>;
+#[derive(Debug)]
+pub struct PeerIndices(RwLock<HashMap<ServerAddress, u64>>);
+
+impl PeerIndices {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, u64>> {
+        self.0.read().expect("PeerIndices lock was posioned")
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, u64>> {
+        self.0.write().expect("PeerIndices lock was posioned")
+    }
+
+    pub fn get(&self, peer: &ServerAddress) -> u64 {
+        self.read().get(peer)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn set(&self, peer: &ServerAddress, index: u64) {
+        self.write().insert(peer.clone(), index);
+    }
+
+    pub fn decrement(&self, peer: &ServerAddress) {
+        let mut map = self.write();
+        let index = map.get(peer).unwrap_or(&1);
+        let new_index = std::cmp::max(index - 1, 1);
+        map.insert(peer.clone(), new_index);
+    }
+
+    pub fn greatest_quorum_index(&self) -> u64 {
+        let map = self.read();
+        let quorum = map.len() / 2;
+        
+        let mut common_indexes: HashMap<u64, usize> = HashMap::new();
+        for (_, index) in map.iter() {
+            let count = common_indexes.entry(*index)
+                .and_modify(|cnt| *cnt += 1)
+                .or_default();
+
+            if *count > quorum {
+                return *index;
+            } 
+        }
+
+        0
+    }
+}
+
+impl FromIterator<(ServerAddress, u64)> for PeerIndices {
+    fn from_iter<T: IntoIterator<Item = (ServerAddress, u64)>>(iter: T) -> Self {
+        let inner: HashMap<ServerAddress, u64> = iter.into_iter().collect();
+        Self(inner.into())
+    }
+}
 
 #[derive(Debug)]
 pub struct Leader {
-    pub next_index: RwLock<PeerIndices>,
-    pub match_index: RwLock<PeerIndices>,
-}
-
-impl Leader {
-    pub fn get_next_index(&self, peer: &ServerAddress) -> usize {
-        self.next_index.read().expect("next_index lock poisoned")
-            .get(peer)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub fn get_match_index(&self, peer: &ServerAddress) -> usize {
-        self.match_index.read().expect("match_index lock poisoned")
-            .get(peer)
-            .copied()
-            .unwrap_or(0)
-    }
+    pub next_index: PeerIndices,
+    pub match_index: PeerIndices,
 }
 
 impl Display for Leader {
