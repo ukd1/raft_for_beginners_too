@@ -26,14 +26,47 @@ impl<C: Connection> Server<Follower, C> {
 
     async fn handle_voterequest(&self, packet: &Packet) -> Result<HandlePacketAction> {
         let current_term = self.term.load(Ordering::Acquire);
+        let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
+            PacketType::VoteRequest { last_log_index, last_log_term } => (*last_log_index, *last_log_term),
+            _ => unreachable!("handle_voterequest called with non-PacketType::VoteRequest"),
+        };
+
+
         let vote_granted = if packet.term == current_term {
-            self.reset_term_timeout().await;
-            let mut last_ballot = self.state.voted_for.lock().expect("voted_for Mutex poisoned");
-            last_ballot.cast_vote(packet.term, &packet.peer)
+            let our_last_log_index = self.journal.last_index();
+            let candidate_log_valid = if candidate_last_log_index == our_last_log_index {
+                // Candidate log is equally up-to-date as ours, so verify terms match;
+                // if both terms are None, then they match without checking the journal,
+                // because both Candidate and Follower journals are empty
+                candidate_last_log_index.map_or(true, |i| {
+                    self.journal.get(i)
+                        .filter(|e| e.term == candidate_last_log_term)
+                        .is_some()
+                })
+            } else if candidate_last_log_index > our_last_log_index {
+                // Candidate log is more up-to-date than ours
+                true
+            } else {
+                // Candidate log is not as up-to-date as ours
+                false
+            };
+
+            if candidate_log_valid {
+                let mut last_ballot = self.state.voted_for.lock().expect("voted_for Mutex poisoned");
+                // Check if we have already voted for someone else in this term
+                last_ballot.cast_vote(packet.term, &packet.peer)
+            } else {
+                // Candidate log is not valid
+                false
+            }
         } else {
             // Packet term is too old
             false
         };
+
+        if vote_granted {
+            self.reset_term_timeout().await;
+        }
         
         let reply = Packet {
             message_type: PacketType::VoteResponse { is_granted: vote_granted },

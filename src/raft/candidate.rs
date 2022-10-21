@@ -72,12 +72,15 @@ impl<C: Connection> Server<Candidate, C> {
             let mut current_span = self.span.lock().expect("span lock poisoned");
             *current_span = tracing::info_span!("election", term = %current_term);
         }
+        let last_log_index = self.journal.last_index();
+        let last_log_term = last_log_index.and_then(|i| self.journal.get(i)).map(|e| e.term).unwrap_or(0);
+
         self.reset_term_timeout().await;
         info!(term = %current_term, "starting new election");
 
         for peer in &self.config.peers {
             let peer_request = Packet {
-                message_type: PacketType::VoteRequest { last_log_index: 0, last_log_term: current_term - 1 }, // TODO: THIS IS THE WRONG TERM, it should come from the log and doesn't need the -1
+                message_type: PacketType::VoteRequest { last_log_index, last_log_term },
                 term: current_term,
                 peer: peer.to_owned(),
             };

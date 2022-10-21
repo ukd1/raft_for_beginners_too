@@ -18,7 +18,7 @@ pub struct Packet {
 #[serde(tag = "type")]
 pub enum PacketType {
     VoteRequest {
-        last_log_index: u64,
+        last_log_index: Option<u64>,
         last_log_term: u64,
     },
     VoteResponse {
