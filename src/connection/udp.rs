@@ -23,7 +23,7 @@ impl Connection for UdpConnection {
         trace!(?packet, "send");
         let data = rmp_serde::to_vec(&packet)
             .map_err(Box::from)
-            .map_err(ConnectionError::EncodingError)?;
+            .map_err(ConnectionError::Encoding)?;
         self.socket.send_to(&data, packet.peer.0).await?;
         Ok(()) // TODO
     }
@@ -35,7 +35,7 @@ impl Connection for UdpConnection {
 
         let mut packet: Packet = rmp_serde::from_slice(&buf)
             .map_err(Box::from)
-            .map_err(ConnectionError::DecodingError)?;
+            .map_err(ConnectionError::Decoding)?;
         trace!(?peer_addr, ?packet, "receive");
         // Change the peer field to be the received peer's, not the one it sent
         // TODO: this is wrong and bad to tamper with wire data

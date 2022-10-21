@@ -42,11 +42,11 @@ pub struct ServerAddress(pub SocketAddr); // TODO: make more generic?
 #[derive(thiserror::Error, Debug)]
 pub enum ConnectionError {
     #[error(transparent)]
-    IoError(#[from] std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("Error decoding packet")]
-    DecodingError(Box<dyn Error + Send + Sync + 'static>),
+    Decoding(Box<dyn Error + Send + Sync + 'static>),
     #[error("Error encoding packet")]
-    EncodingError(Box<dyn Error + Send + Sync + 'static>),
+    Encoding(Box<dyn Error + Send + Sync + 'static>),
 }
 
 #[async_trait]

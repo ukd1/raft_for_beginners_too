@@ -1,4 +1,4 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::{sync::{Arc, atomic::Ordering}, cmp};
 
 use tracing::{info, warn, debug};
 
@@ -34,21 +34,21 @@ impl<C: Connection> Server<Follower, C> {
 
         let vote_granted = if packet.term == current_term {
             let our_last_log_index = self.journal.last_index();
-            let candidate_log_valid = if candidate_last_log_index == our_last_log_index {
+            let candidate_log_valid = match candidate_last_log_index.cmp(&our_last_log_index) {
+                // Candidate log is more up-to-date than ours
+                cmp::Ordering::Greater => true,
+                // Candidate log is not as up-to-date as ours
+                cmp::Ordering::Less => false,
                 // Candidate log is equally up-to-date as ours, so verify terms match;
                 // if both terms are None, then they match without checking the journal,
                 // because both Candidate and Follower journals are empty
-                candidate_last_log_index.map_or(true, |i| {
-                    self.journal.get(i)
-                        .filter(|e| e.term == candidate_last_log_term)
-                        .is_some()
-                })
-            } else if candidate_last_log_index > our_last_log_index {
-                // Candidate log is more up-to-date than ours
-                true
-            } else {
-                // Candidate log is not as up-to-date as ours
-                false
+                cmp::Ordering::Equal => {
+                    candidate_last_log_index.map_or(true, |i| {
+                        self.journal.get(i)
+                            .filter(|e| e.term == candidate_last_log_term)
+                            .is_some()
+                    })
+                },
             };
 
             if candidate_log_valid {

@@ -154,8 +154,8 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
             term: candidate.term,
             journal: candidate.journal,
             state: Leader {
-                next_index: next_index.into(),
-                match_index: match_index.into(),
+                next_index,
+                match_index,
             },
         }
     }

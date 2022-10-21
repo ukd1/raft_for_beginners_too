@@ -137,7 +137,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
     async fn handle_packet_downcast(&self, packet: Packet) -> Result<HandlePacketAction> {
         use HandlePacketAction::*;
 
-        if let Err(_) = self.update_term(&packet).await {
+        if self.update_term(&packet).await.is_err() {
             // Term from packet was greater than our term,
             // transition to Follower
             if !self.in_state::<Follower>() {
@@ -248,7 +248,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
                 },
                 _ = status_interval.tick() => {
                     let term = self.term.load(Ordering::Relaxed);
-                    let last_index = self.journal.last_index().map(|i| i.to_string()).unwrap_or("X".to_string());
+                    let last_index = self.journal.last_index().map(|i| i.to_string()).unwrap_or_else(|| "X".to_string());
                     let commit_index = self.journal.commit_index();
                     let status_string = format!("\x1Bk{}[t{},i{},c{}]\x1B", self.state, term, last_index, commit_index);
                     let _yeet = stdout.write_all(status_string.as_bytes()).await;
