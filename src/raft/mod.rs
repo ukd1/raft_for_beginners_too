@@ -106,6 +106,14 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         dyn_state.is::<T>()
     }
 
+    fn quorum(&self) -> usize {
+        // len+1 because quorum counts this node
+        // and final +1 to break a tie; comparisons
+        // should be count >= quorum.
+        let node_cnt = self.config.peers.len() + 1;
+        node_cnt / 2 + 1
+    }
+
     fn downcast(&self) -> ServerImpl<C> {
         let dyn_self = self as &dyn Any;
         if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C>>() {
@@ -122,6 +130,8 @@ impl<S: ServerState, C: Connection> Server<S, C> {
     #[tracing::instrument(
         level = tracing::Level::TRACE,
         name = "handle_packet",
+        skip_all,
+        fields(term = self.term.load(Ordering::Relaxed)),
         parent = self.span.try_lock()
             .map_or_else(|_| tracing::Span::current(), |s| s.clone().or_current())
     )]
@@ -220,9 +230,9 @@ impl<S: ServerState, C: Connection> Server<S, C> {
                 },
                 _ = status_interval.tick() => {
                     let term = self.term.load(Ordering::Relaxed);
-                    let last_index = self.journal.last_index().saturating_sub(1);
-                    let status_string = format!("\x1Bk{}[t{},i{}]\x1B", self.state, term, last_index);
-                    // println!("\x1Bk{:?}\x1B", *server_state);
+                    let last_index = self.journal.last_index().map(|i| i.to_string()).unwrap_or("X".to_string());
+                    let commit_index = self.journal.commit_index();
+                    let status_string = format!("\x1Bk{}[t{},i{},c{}]\x1B", self.state, term, last_index, commit_index);
                     let _yeet = stdout.write_all(status_string.as_bytes()).await;
                     let _yeet = stdout.flush().await;
                 }

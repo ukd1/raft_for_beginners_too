@@ -2,7 +2,7 @@ use std::sync::{Arc, atomic::Ordering};
 
 use tracing::{info, warn, debug};
 
-use crate::connection::{Connection, Packet, PacketType};
+use crate::{connection::{Connection, Packet, PacketType}, journal::JournalEntry};
 
 use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, HandlePacketAction, StateResult, ServerHandle};
 
@@ -53,45 +53,55 @@ impl<C: Connection> Server<Follower, C> {
             ),
             _ => unreachable!("handle_appendentries called with non-PacketType::AppendEntries"),
         };
-        let ack = if packet.term != current_term {
-            // Packet term is too old
-            false
-        } else if prev_log_index == 0 {
-            true
-        } else if let Some(entry) = self.journal.get(prev_log_index) {
-            entry.term == *prev_log_term
-        } else {
-            false
+
+        let term_matches = packet.term == current_term;
+
+        if term_matches {
+            self.reset_term_timeout().await;
+        }
+
+        let prev_log_matches = match prev_log_index {
+            None => true,
+            Some(index) => self.journal.get(index)
+                .filter(|e| e.term == *prev_log_term)
+                .is_some()
         };
 
+        let ack = term_matches && prev_log_matches;
+
         let match_index = if ack {
-            for (i, entry) in entries.iter().enumerate() {
-                let entry_index = prev_log_index + (i as u64);
-                if let Some(existing_entry) = self.journal.get(entry_index) {
+            for (packet_entry_idx, packet_entry) in entries.iter().enumerate() {
+                let maybe_existing: Option<(u64, JournalEntry)> = prev_log_index
+                    .map(|prev_log_index| prev_log_index + (packet_entry_idx as u64) + 1)
+                    .and_then(|i| Some(i).zip(self.journal.get(i)));
+
+                if let Some((existing_entry_idx, existing_entry)) = maybe_existing {
                     // 3. If an existing entry conflicts with a new one (same index but different terms)
-                    if existing_entry.term != entry.term {
+                    if existing_entry.term != packet_entry.term {
                         // delete all delete the existing entry and all that follow it (§5.3)
-                        self.journal.truncate(entry_index);
-                        warn!(last_index = %entry_index, "truncated journal");
+                        self.journal.truncate(existing_entry_idx);
+                        warn!(last_index = %existing_entry_idx, "truncated journal");
                         break;
                     }
                 } else {
                     // 4. Append any new entries not already in the logs
-                    self.journal.append_entry(entry.to_owned());
-                    debug!(index = %entry_index, "appended entry to journal");
+                    let new_entry_idx = self.journal.append_entry(packet_entry.to_owned());
+                    debug!(index = %new_entry_idx, ?packet_entry, "appended entry to journal");
                 }
             }
 
             // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-            let commit_index = self.journal.commit_index.load(Ordering::Acquire).try_into()?;
             let last_entry_index = self.journal.last_index();
-            if *leader_commit > commit_index {
-                let commit_index = std::cmp::min(*leader_commit, last_entry_index);
-                self.journal.commit_index.store(commit_index.try_into()?, Ordering::Release);
+            if let Some(last_entry_index) = last_entry_index {
+                let commit_index = self.journal.commit_index.load(Ordering::Acquire).try_into()?;
+                if *leader_commit > commit_index {
+                    let commit_index = std::cmp::min(*leader_commit, last_entry_index);
+                    debug!(%commit_index, "updating commit index");
+                    self.journal.commit_index.store(commit_index.try_into()?, Ordering::Release);
+                }
             }
 
-            self.reset_term_timeout().await;
-            Some(last_entry_index)
+            last_entry_index
         } else {
             None
         };

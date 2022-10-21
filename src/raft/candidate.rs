@@ -56,14 +56,14 @@ impl<C: Connection> Server<Candidate, C> {
     }
 
     fn has_won_election(&self) -> bool {
-        // count votes and nodes
-        // add 1 to each so we count ourselves
+        // count votes
+        // add 1 so we count ourselves
         let vote_cnt = self.state.votes.vote_count() + 1;
-        let node_cnt = self.config.peers.len() + 1;
-        debug!(?vote_cnt, ?node_cnt, "checking vote count");
+        let quorum = self.quorum();
+        debug!(%vote_cnt, %quorum, "checking vote count");
 
-        // did we get more than half the votes, including our own?
-        vote_cnt > (node_cnt / 2)
+        // did we get quorum, including our own vote?
+        vote_cnt >= quorum
     }
 
     async fn start_election(&self) -> Result<()> {
@@ -75,7 +75,7 @@ impl<C: Connection> Server<Candidate, C> {
         self.reset_term_timeout().await;
         info!(term = %current_term, "starting new election");
 
-        for peer in self.config.peers.iter() {
+        for peer in &self.config.peers {
             let peer_request = Packet {
                 message_type: PacketType::VoteRequest { last_log_index: 0, last_log_term: current_term - 1 }, // TODO: THIS IS THE WRONG TERM, it should come from the log and doesn't need the -1
                 term: current_term,

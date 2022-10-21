@@ -1,6 +1,6 @@
-use std::{collections::HashMap, sync::{RwLock, Mutex}, any::Any, fmt::{Debug, Display}};
+use std::{collections::{HashMap, BTreeMap}, sync::{RwLock, Mutex}, any::Any, fmt::{Debug, Display}};
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use crate::connection::{ServerAddress, Connection};
 
@@ -87,62 +87,81 @@ impl ElectionTally {
 
     pub fn vote_count(&self) -> usize {
         let election_results = self.votes.lock().expect("votes Mutex poisoned");
-        debug!(votes = ?*election_results, "vote count");
+        trace!(votes = ?*election_results, "vote count");
         election_results.values().filter(|v| **v).count()
     }
 }
 
 #[derive(Debug)]
-pub struct PeerIndices(RwLock<HashMap<ServerAddress, u64>>);
+pub struct PeerIndices(RwLock<HashMap<ServerAddress, Option<u64>>>);
 
 impl PeerIndices {
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, u64>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, Option<u64>>> {
         self.0.read().expect("PeerIndices lock was posioned")
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, u64>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, Option<u64>>> {
         self.0.write().expect("PeerIndices lock was posioned")
     }
 
-    pub fn get(&self, peer: &ServerAddress) -> u64 {
+    pub fn get(&self, peer: &ServerAddress) -> Option<u64> {
         self.read().get(peer)
             .copied()
-            .unwrap_or(0)
+            .flatten()
     }
 
-    pub fn set(&self, peer: &ServerAddress, index: u64) {
+    pub fn set(&self, peer: &ServerAddress, index: Option<u64>) {
         self.write().insert(peer.clone(), index);
     }
 
     pub fn decrement(&self, peer: &ServerAddress) {
         let mut map = self.write();
-        let index = map.get(peer).unwrap_or(&1);
-        let new_index = std::cmp::max(index - 1, 1);
+        let new_index = map.get(peer)
+            .copied()
+            .flatten()
+            .and_then(|i| i.checked_sub(1));
         map.insert(peer.clone(), new_index);
     }
 
-    pub fn greatest_quorum_index(&self) -> u64 {
+    /// Get the highest index for which a quorum of nodes
+    /// exists
+    /// 
+    /// Parameters:
+    /// quorum - the number of nodes required to establish a majority
+    pub fn greatest_quorum_index(&self, quorum: usize) -> u64 {
         let map = self.read();
-        let quorum = map.len() / 2;
         
-        let mut common_indexes: HashMap<u64, usize> = HashMap::new();
-        for (_, index) in map.iter() {
-            let count = common_indexes.entry(*index)
+        let mut index_counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for index in map.iter().filter_map(|(_, opt_i)| opt_i.as_ref()) {
+            let count = index_counts.entry(*index)
                 .and_modify(|cnt| *cnt += 1)
-                .or_default();
+                .or_insert(1);
 
-            if *count > quorum {
+            // Early return if any one index value
+            // has quorum
+            if *count >= quorum {
                 return *index;
             } 
         }
 
+        // In highest to lowest index order (rev), sum the count
+        // of nodes whose index is the current value or higher
+        let mut greatest_quorum_index_count = 0;
+        for (index, count) in index_counts.into_iter().rev() {
+            greatest_quorum_index_count += count;
+            if greatest_quorum_index_count >= quorum {
+                return index;
+            }
+        }
+
+        // If there was no quorum, return index 0
         0
     }
 }
 
-impl FromIterator<(ServerAddress, u64)> for PeerIndices {
-    fn from_iter<T: IntoIterator<Item = (ServerAddress, u64)>>(iter: T) -> Self {
-        let inner: HashMap<ServerAddress, u64> = iter.into_iter().collect();
+impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
+    fn from_iter<T: IntoIterator<Item = (ServerAddress, Option<u64>)>>(iter: T) -> Self {
+        let inner: HashMap<ServerAddress, Option<u64>> = iter.into_iter().collect();
         Self(inner.into())
     }
 }

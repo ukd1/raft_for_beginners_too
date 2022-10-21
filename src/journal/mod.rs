@@ -2,7 +2,7 @@ use std::{sync::{RwLock, atomic::{AtomicUsize, Ordering}}, fmt::{self, Display}}
 
 use serde::{Serialize, Deserialize};
 use tokio::sync::watch;
-use tracing::warn;
+use tracing::{warn, trace};
 
 impl Journal {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry>> {
@@ -13,17 +13,26 @@ impl Journal {
         self.entries.write().expect("Journal lock was posioned")
     }
 
-    pub fn append_entry(&self, entry: JournalEntry) {
-        self.write().push(entry);
+    pub fn append_entry(&self, entry: JournalEntry) -> u64 {
+        let mut entries = self.write();
+        entries.push(entry);
+        let last_index = entries.len() - 1;
+        last_index.try_into().expect("journal.len() overflowed u64")
     }
 
-    pub fn append(&self, term: u64, cmd: String) {
-        self.write().push(
+    /// Append a command to the journal
+    /// 
+    /// Returns: index of the appended entry
+    pub fn append(&self, term: u64, cmd: String) -> u64 {
+        let mut entries = self.write();
+        entries.push(
             crate::journal::JournalEntry {
                 term,
                 cmd,
             }
         );
+        let last_index = entries.len() - 1;
+        last_index.try_into().expect("journal.len() overflowed u64")
     }
 
     pub fn truncate(&self, index: u64) {
@@ -37,27 +46,40 @@ impl Journal {
     }
 
     // lastApplied
-    pub fn last_index(&self) -> u64 {
+    pub fn last_index(&self) -> Option<u64> {
         let len = self.read().len();
-        let last_index = len.saturating_sub(1);
-        last_index.try_into().expect("journal.len() overflowed u64")
+        let last_index = if len > 0 {
+            len - 1
+        } else {
+            return None;
+        };
+        let last_index = last_index.try_into().expect("journal.len() overflowed u64");
+        Some(last_index)
     }
 
-    pub fn get_update(&self, index: u64) -> JournalUpdate {
+    pub fn commit_index(&self) -> u64 {
+        self.commit_index.load(Ordering::Acquire)
+            .try_into().expect("commit_index overflowed u64")
+    }
+
+    pub fn set_commit_index(&self, index: u64) {
+        let index: usize = index.try_into().expect("index overflowed usize");
+        self.commit_index.store(index, Ordering::Release);
+    }
+
+    pub fn get_update(&self, index: Option<u64>) -> JournalUpdate {
         let entries = self.read();
 
-        let index: usize = index.try_into().expect("index overflowed usize");
-        let prev_index = if index > 0 { index - 1 } else { 0 };
-        let prev_term = match entries.get(prev_index) {
-            Some(prev) => prev.term,
-            None => 0,
-        };
+        let index = index.map(|i| usize::try_from(i).expect("index overflowed usize"));
+        let prev_index = index.map(|i| i.saturating_sub(1));
+        let prev_term = prev_index.and_then(|i| entries.get(i)).map(|e| e.term);
 
-        let update_entries: Vec<_> = match entries.get(index..) {
+        let update_start_index = index.unwrap_or(0);
+        let update_entries: Vec<_> = match entries.get(update_start_index..) {
             Some(v) => v.into(),
             None => {
                 if !entries.is_empty() {
-                    warn!(%index, "update requested beyond journal end");
+                    warn!(index = %update_start_index, "update requested beyond journal end");
                 }
                 vec![]
             },
@@ -67,13 +89,13 @@ impl Journal {
         let last_index = entries.len().saturating_sub(1);
         let commit_index = std::cmp::min(last_index, self.commit_index.load(Ordering::Acquire));
 
-        tracing::trace!(%index, %prev_index, %prev_term, ?update_entries, "journal update");
+        trace!(?index, ?prev_index, ?prev_term, ?update_entries, "journal update");
 
         JournalUpdate {
-            prev_term,
-            prev_index,
+            prev_term: prev_term.unwrap_or(0),
+            prev_index: prev_index.map(|i| i.try_into().expect("prev_index overflowed u64")),
             entries: update_entries,
-            commit_index,
+            commit_index: commit_index.try_into().expect("commit_index overflowed u64"),
         }
     }
 
@@ -123,9 +145,9 @@ pub struct JournalEntry {
 
 pub struct JournalUpdate {
     pub prev_term: u64, // TODO make these a u32
-    pub prev_index: usize, // TODO make these a u32
+    pub prev_index: Option<u64>, // TODO make these a u32
     pub entries: Vec<JournalEntry>,
-    pub commit_index: usize, // TODO make these a u32
+    pub commit_index: u64, // TODO make these a u32
 }
 
 #[cfg(test)]

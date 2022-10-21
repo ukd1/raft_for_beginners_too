@@ -25,7 +25,7 @@ pub enum PacketType {
         is_granted: bool,
     },
     AppendEntries {
-        prev_log_index: u64,
+        prev_log_index: Option<u64>,
         prev_log_term: u64,
         entries: Vec<JournalEntry>,
         leader_commit: u64,
