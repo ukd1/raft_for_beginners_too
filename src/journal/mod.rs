@@ -1,4 +1,4 @@
-use std::sync::{RwLock, atomic::{AtomicUsize, Ordering}};
+use std::{sync::{RwLock, atomic::{AtomicUsize, Ordering}}, fmt::{self, Display}};
 
 use serde::{Serialize, Deserialize};
 use tokio::sync::watch;
@@ -88,11 +88,20 @@ impl Journal {
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Journal {
     entries: RwLock<Vec<JournalEntry>>,
     pub commit_index: AtomicUsize,
+    #[serde(skip)]
     change_sender: watch::Sender<()>,
+}
+
+impl Display for Journal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let json_value = serde_json::to_value(self)
+            .map_err(|_| fmt::Error::default())?;
+        write!(f, "{:#}", json_value)
+    }
 }
 
 impl Default for Journal {

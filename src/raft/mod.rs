@@ -11,7 +11,7 @@ use rand::Rng;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
-use tracing::info;
+use tracing::{info, debug};
 
 use state::ServerState;
 
@@ -216,6 +216,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             tokio::select! {
                 _ = usr1_stream.recv() => {
                     info!(state = %self.state, "SIGUSR1");
+                    debug!(journal = %self.journal, "SIGUSR1");
                 },
                 _ = status_interval.tick() => {
                     let term = self.term.load(Ordering::Relaxed);
