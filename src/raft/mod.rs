@@ -11,7 +11,7 @@ use rand::Rng;
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
-use tracing::{info, debug};
+use tracing::{info, debug, warn, info_span, Instrument};
 
 use state::ServerState;
 
@@ -41,7 +41,6 @@ pub struct Server<S: ServerState, C: Connection> {
     journal: Journal,
     pub state: S,
     pub term: AtomicU64,
-    span: std::sync::Mutex<tracing::Span>,
 }
 
 enum ServerImpl<'s, C: Connection> {
@@ -93,7 +92,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
     async fn update_term(&self, packet: &Packet) -> StdResult<u64, u64> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
-            info!(term = %packet.term, "newer term in packet");
+            info!(%packet.term, "newer term in packet");
             self.term.store(packet.term, Ordering::Release);
             Err(packet.term)
         } else {
@@ -128,12 +127,12 @@ impl<S: ServerState, C: Connection> Server<S, C> {
     }
 
     #[tracing::instrument(
-        level = tracing::Level::TRACE,
         name = "handle_packet",
         skip_all,
-        fields(term = self.term.load(Ordering::Relaxed)),
-        parent = self.span.try_lock()
-            .map_or_else(|_| tracing::Span::current(), |s| s.clone().or_current())
+        fields(
+            term = %self.term.load(Ordering::Relaxed),
+            state = %self.state,
+        ),
     )]
     async fn handle_packet_downcast(&self, packet: Packet) -> Result<HandlePacketAction> {
         use HandlePacketAction::*;
@@ -158,6 +157,14 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         Ok(action)
     }
 
+    #[tracing::instrument(
+        name = "handle_timeout",
+        skip_all,
+        fields(
+            term = %self.term.load(Ordering::Relaxed),
+            state = %self.state,
+        ),
+    )]
     async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction> {
         use HandlePacketAction::*;
 
@@ -173,7 +180,11 @@ impl<S: ServerState, C: Connection> Server<S, C> {
     async fn main(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
         use HandlePacketAction::*;
 
-        info!(state = %self.state, term = %self.term.load(Ordering::Relaxed), "state change");
+        let current_term = self.term.load(Ordering::Relaxed);
+        let startup_span = info_span!("startup", term = %current_term, state = %self.state);
+        if current_term > 0 {
+            startup_span.in_scope(|| warn!("state change"));
+        }
 
         let mut main_tasks = JoinSet::new();
         main_tasks.spawn(Arc::clone(&self).signal_handler());
@@ -183,7 +194,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             // were not, then a check for first_packet would have to
             // be run in every loop iteration, every time a packet
             // is received--an unnecessary performance penalty.
-            let action = self.handle_packet_downcast(packet).await?;
+            let action = self.handle_packet_downcast(packet).instrument(startup_span).await?;
             assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
             if let ChangeState(maybe_packet) = action {
                 main_tasks.shutdown().await;
@@ -214,6 +225,13 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         }
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            term = %self.term.load(Ordering::Relaxed),
+            state = %self.state,
+        ),
+    )]
     async fn signal_handler(self: Arc<Self>) -> Result<()> {
         use tokio::signal::unix::{signal, SignalKind};
 
@@ -225,8 +243,8 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         loop {
             tokio::select! {
                 _ = usr1_stream.recv() => {
-                    info!(state = %self.state, "SIGUSR1");
-                    debug!(journal = %self.journal, "SIGUSR1");
+                    info!("SIGUSR1");
+                    debug!(target: concat!(env!("CARGO_PKG_NAME"), "::journal"), journal = %self.journal, "SIGUSR1");
                 },
                 _ = status_interval.tick() => {
                     let term = self.term.load(Ordering::Relaxed);

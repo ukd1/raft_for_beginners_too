@@ -153,7 +153,6 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
             config: candidate.config,
             term: candidate.term,
             journal: candidate.journal,
-            span: tracing::Span::none().into(),
             state: Leader {
                 next_index: next_index.into(),
                 match_index: match_index.into(),

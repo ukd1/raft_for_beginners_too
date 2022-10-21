@@ -89,7 +89,7 @@ impl Journal {
         let last_index = entries.len().saturating_sub(1);
         let commit_index = std::cmp::min(last_index, self.commit_index.load(Ordering::Acquire));
 
-        trace!(?index, ?prev_index, ?prev_term, ?update_entries, "journal update");
+        trace!(?index, ?prev_index, ?prev_term, ?update_entries, "generate journal update");
 
         JournalUpdate {
             prev_term: prev_term.unwrap_or(0),

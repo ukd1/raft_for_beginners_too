@@ -8,7 +8,7 @@ use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}
 
 impl<C: Connection> Server<Follower, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
-        warn!(term = %self.term.load(Ordering::Relaxed), "Follower timeout");
+        warn!("Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
     }
@@ -73,7 +73,7 @@ impl<C: Connection> Server<Follower, C> {
             term: current_term,
             peer: packet.peer.clone(),
         };
-        info!(candidate = ?reply.peer, term = ?reply.term, ?vote_granted, "casting vote");
+        info!(candidate = ?reply.peer, ?vote_granted, "casting vote");
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
@@ -168,11 +168,11 @@ impl<C: Connection> Server<Follower, C> {
                 config,
                 journal: Default::default(),
                 term: 0.into(),
-                span: tracing::Span::none().into(),
                 state: Follower::new(timeout),
             };
             let mut packet = None;
             let mut candidate;
+            info!("starting node");
             loop {
                 (candidate, packet) = follower.run(packet).await?;
                 (follower, packet) = match candidate.run(packet).await? {
@@ -192,7 +192,6 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
             config: candidate.config,
             term: candidate.term,
             journal: candidate.journal,
-            span: tracing::Span::none().into(),
             state: Follower::new(timeout),
         }
     }
@@ -205,7 +204,6 @@ impl<C: Connection> From<Server<Leader, C>> for Server<Follower, C> {
             connection: leader.connection,
             config: leader.config,
             term: leader.term,
-            span: tracing::Span::none().into(),
             journal: leader.journal,
             state: Follower::new(timeout),
         }

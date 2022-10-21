@@ -1,12 +1,12 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::{sync::{atomic::Ordering, Arc}};
 
-use tracing::{warn, info, debug};
+use tracing::{warn, info, debug, Instrument, Span, field};
 use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
 
 impl<C: Connection> Server<Candidate, C> {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
-        warn!(term = %self.term.load(Ordering::Relaxed), "Candidate timeout");
+        warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
         Ok(HandlePacketAction::MaintainState(None))
@@ -30,7 +30,7 @@ impl<C: Connection> Server<Candidate, C> {
     async fn handle_voteresponse(&self, packet: &Packet) -> Result<HandlePacketAction> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term != current_term {
-            warn!(peer = ?packet.peer, term = ?packet.term, "got a vote response for the wrong term");
+            warn!(?packet.peer, ?packet.term, "got a vote response for the wrong term");
             return Ok(HandlePacketAction::MaintainState(None));
         }
 
@@ -39,12 +39,11 @@ impl<C: Connection> Server<Candidate, C> {
         } else {
             unreachable!("handle_voteresponse called with a non-VoteResponse packet");
         };
-        debug!(peer = ?packet.peer, term = ?packet.term, is_granted, "got a vote response");
+        debug!(?packet.peer, ?packet.term, is_granted, "got a vote response");
         self.state.votes.record_vote(&packet.peer, is_granted);
 
         if self.has_won_election() {
             info!(
-                term = %self.term.load(Ordering::Acquire),
                 vote_cnt = %(self.state.votes.vote_count() + 1),
                 node_cnt = %(self.config.peers.len() + 1),
                 "won election"
@@ -68,15 +67,19 @@ impl<C: Connection> Server<Candidate, C> {
 
     async fn start_election(&self) -> Result<()> {
         let current_term = self.term.fetch_add(1, Ordering::Release) + 1;
-        {
-            let mut current_span = self.span.lock().expect("span lock poisoned");
-            *current_span = tracing::info_span!("election", term = %current_term);
-        }
+        // There is a bug in tracing_subscriber that causes the
+        // term field to be logged twice when an election timeout
+        // occurs in Candidate state. The `tracing` crate correctly
+        // updates the original `term` field on the span to the new
+        // value, but `tracing_subscriber` only appends new values
+        // to the log line for... reasons. See:
+        // https://github.com/tokio-rs/tracing/issues/2334
+        Span::current().record("term", current_term);
         let last_log_index = self.journal.last_index();
         let last_log_term = last_log_index.and_then(|i| self.journal.get(i)).map(|e| e.term).unwrap_or(0);
 
         self.reset_term_timeout().await;
-        info!(term = %current_term, "starting new election");
+        info!("starting new election");
 
         for peer in &self.config.peers {
             let peer_request = Packet {
@@ -90,6 +93,14 @@ impl<C: Connection> Server<Candidate, C> {
         Ok(())
     }
 
+    #[tracing::instrument(
+        name = "election",
+        skip_all,
+        fields(
+            term = field::Empty, // Set in self.start_election()
+            state = %self.state,
+        ),
+    )]
     pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<ElectionResult<C>> {
         let this = Arc::new(self);
         let packet_for_next_state = {
@@ -97,7 +108,8 @@ impl<C: Connection> Server<Candidate, C> {
             let loop_h = tokio::spawn(Arc::clone(&this).main(next_packet));
             // ...send a voterequest packet to all peers, then...
             let this_election = Arc::clone(&this);
-            tokio::spawn(async move { this_election.start_election().await }).await??; // TODO: add timeout
+            let current_span = Span::current();
+            tokio::spawn(async move { this_election.start_election().instrument(current_span).await }).await??; // TODO: add timeout
             // ...await task results.
             loop_h.await??
         };
@@ -118,7 +130,6 @@ impl<C: Connection> From<Server<Follower, C>> for Server<Candidate, C> {
             connection: follower.connection,
             config: follower.config,
             term: follower.term,
-            span: tracing::Span::none().into(),
             journal: follower.journal,
             state: Candidate::new(timeout),
         }
