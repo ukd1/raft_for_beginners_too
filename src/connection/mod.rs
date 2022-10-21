@@ -1,6 +1,6 @@
 pub mod udp;
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, error::Error};
 
 use async_trait::async_trait;
 use derive_more::{From, FromStr};
@@ -43,6 +43,10 @@ pub struct ServerAddress(pub SocketAddr); // TODO: make more generic?
 pub enum ConnectionError {
     #[error(transparent)]
     IoError(#[from] std::io::Error),
+    #[error("Error decoding packet")]
+    DecodingError(Box<dyn Error + Send + Sync + 'static>),
+    #[error("Error encoding packet")]
+    EncodingError(Box<dyn Error + Send + Sync + 'static>),
 }
 
 #[async_trait]
