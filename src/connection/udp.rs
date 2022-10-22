@@ -10,7 +10,7 @@ pub struct UdpConnection {
 }
 
 #[async_trait]
-impl Connection for UdpConnection {
+impl<V> Connection<V> for UdpConnection {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
         let socket = UdpSocket::bind(bind_socket.0).await?;
@@ -19,7 +19,7 @@ impl Connection for UdpConnection {
         }) // TODO
     }
 
-    async fn send(&self, packet: Packet) -> Result<(), ConnectionError> {
+    async fn send(&self, packet: Packet<V>) -> Result<(), ConnectionError> {
         trace!(?packet, "send");
         let data = rmp_serde::to_vec(&packet)
             .map_err(Box::from)
@@ -28,7 +28,7 @@ impl Connection for UdpConnection {
         Ok(()) // TODO
     }
 
-    async fn receive(&self) -> Result<Packet, ConnectionError> {
+    async fn receive(&self) -> Result<Packet<V>, ConnectionError> {
         let mut buf = vec![0; 65536];
         let (bytes_received, peer_addr) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(bytes_received);

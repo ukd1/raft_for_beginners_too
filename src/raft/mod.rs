@@ -21,7 +21,7 @@ use crate::connection::{ConnectionError, Packet, Connection};
 use self::state::{Follower, Candidate, Leader};
 
 pub type Result<T> = std::result::Result<T, ServerError>;
-type StateResult<T> = Result<(T, Option<Packet>)>;
+type StateResult<T, V> = Result<(T, Option<Packet<V>>)>;
 pub type ServerHandle = JoinHandle<Result<()>>;
 
 #[derive(thiserror::Error, Debug)]
@@ -35,27 +35,27 @@ pub enum ServerError {
 }
 
 #[derive(Debug)]
-pub struct Server<S: ServerState, C: Connection> {
+pub struct Server<S: ServerState, C: Connection<V>, V> {
     connection: C,
     config: crate::config::Config,
-    journal: Journal,
+    journal: Journal<V>,
     pub state: S,
     pub term: AtomicU64,
 }
 
-enum ServerImpl<'s, C: Connection> {
-    Follower(&'s Server<Follower, C>),
-    Candidate(&'s Server<Candidate, C>),
-    Leader(&'s Server<Leader, C>),
+enum ServerImpl<'s, C: Connection<V>, V> {
+    Follower(&'s Server<Follower, C, V>),
+    Candidate(&'s Server<Candidate, C, V>),
+    Leader(&'s Server<Leader, C, V>),
 }
 
-pub(crate) enum HandlePacketAction {
-    MaintainState(Option<Packet>),
-    ChangeState(Option<Packet>),
+pub(crate) enum HandlePacketAction<V> {
+    MaintainState(Option<Packet<V>>),
+    ChangeState(Option<Packet<V>>),
 }
 
-impl<C: Connection> ServerImpl<'_, C> {
-    pub async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
+impl<C: Connection<V>, V> ServerImpl<'_, C, V> {
+    pub async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
             ServerImpl::Candidate(c) => c.handle_packet(packet).await,
@@ -63,7 +63,7 @@ impl<C: Connection> ServerImpl<'_, C> {
         }
     }
 
-    pub async fn handle_timeout(&self) -> Result<HandlePacketAction> {
+    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
         match self {
             ServerImpl::Follower(f) => f.handle_timeout().await,
             ServerImpl::Candidate(c) => c.handle_timeout().await,
@@ -72,7 +72,7 @@ impl<C: Connection> ServerImpl<'_, C> {
     }
 }
 
-impl<S: ServerState, C: Connection> Server<S, C> {
+impl<S: ServerState, C: Connection<V>, V> Server<S, C, V> {
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
         let min = min.as_millis() as u64;
         let max = max.as_millis() as u64;
@@ -89,7 +89,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         self.state.set_timeout(new_timeout);
     }
    
-    async fn update_term(&self, packet: &Packet) -> StdResult<u64, u64> {
+    async fn update_term(&self, packet: &Packet<V>) -> StdResult<u64, u64> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
             info!(%packet.term, "newer term in packet");
@@ -113,13 +113,13 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         node_cnt / 2 + 1
     }
 
-    fn downcast(&self) -> ServerImpl<C> {
+    fn downcast(&self) -> ServerImpl<C, V> {
         let dyn_self = self as &dyn Any;
-        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C>>() {
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, V>>() {
             ServerImpl::Follower(follower)
-        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C>>() {
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, V>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader, C>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader, C, V>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);
@@ -134,7 +134,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             state = %self.state,
         ),
     )]
-    async fn handle_packet_downcast(&self, packet: Packet) -> Result<HandlePacketAction> {
+    async fn handle_packet_downcast(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         use HandlePacketAction::*;
 
         if self.update_term(&packet).await.is_err() {
@@ -165,7 +165,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
             state = %self.state,
         ),
     )]
-    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction> {
+    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<V>> {
         use HandlePacketAction::*;
 
         let mut action = self.downcast().handle_timeout().await?;
@@ -177,7 +177,7 @@ impl<S: ServerState, C: Connection> Server<S, C> {
         Ok(action)
     }
 
-    async fn main(self: Arc<Self>, first_packet: Option<Packet>) -> Result<Option<Packet>> {
+    async fn main(self: Arc<Self>, first_packet: Option<Packet<V>>) -> Result<Option<Packet<V>>> {
         use HandlePacketAction::*;
 
         let current_term = self.term.load(Ordering::Relaxed);

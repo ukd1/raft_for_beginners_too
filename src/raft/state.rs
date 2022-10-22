@@ -178,9 +178,9 @@ impl Display for Leader {
     }
 }
 
-pub enum ElectionResult<C: Connection> {
-    Follower(Server<Follower, C>),
-    Leader(Server<Leader, C>),
+pub enum ElectionResult<C: Connection<V>, V> {
+    Follower(Server<Follower, C, V>),
+    Leader(Server<Leader, C, V>),
 }
 
 pub trait ServerState: Debug + Display + Any + Send + Sync {

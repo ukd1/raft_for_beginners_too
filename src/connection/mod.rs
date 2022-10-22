@@ -8,15 +8,15 @@ use serde::{Serialize, Deserialize};
 
 use crate::journal::JournalEntry;
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Packet {
-    pub message_type: PacketType,
+pub struct Packet<V> {
+    pub message_type: PacketType<V>,
     pub peer: ServerAddress,
     pub term: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
-pub enum PacketType {
+pub enum PacketType<V> {
     VoteRequest {
         last_log_index: Option<u64>,
         last_log_term: u64,
@@ -27,7 +27,7 @@ pub enum PacketType {
     AppendEntries {
         prev_log_index: Option<u64>,
         prev_log_term: u64,
-        entries: Vec<JournalEntry>,
+        entries: Vec<JournalEntry<V>>,
         leader_commit: u64,
     },
     AppendEntriesAck {
@@ -50,9 +50,9 @@ pub enum ConnectionError {
 }
 
 #[async_trait]
-pub trait Connection: std::fmt::Debug + Sized + Send + Sync + 'static {
+pub trait Connection<V>: std::fmt::Debug + Sized + Send + Sync + 'static {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError>;
-    async fn send(&self, packet: Packet) -> Result<(), ConnectionError>;
-    async fn receive(&self) -> Result<Packet, ConnectionError>;
+    async fn send(&self, packet: Packet<V>) -> Result<(), ConnectionError>;
+    async fn receive(&self) -> Result<Packet<V>, ConnectionError>;
     fn address(&self) -> ServerAddress;
 }

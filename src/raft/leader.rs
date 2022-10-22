@@ -7,8 +7,8 @@ use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketActi
 
 use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult};
 
-impl<C: Connection> Server<Leader, C> {
-    pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
+impl<C: Connection<V>, V> Server<Leader, C, V> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         use PacketType::*;
 
         match packet.message_type {
@@ -29,7 +29,7 @@ impl<C: Connection> Server<Leader, C> {
         self.state.match_index.set(&leader_addr, Some(index));
     }
 
-    async fn handle_appendentriesack(&self, packet: &Packet) -> Result<HandlePacketAction> {
+    async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
         // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
@@ -62,7 +62,7 @@ impl<C: Connection> Server<Leader, C> {
         Ok(HandlePacketAction::MaintainState(None))
     }
 
-    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<Server<Follower, C>> {
+    pub(super) async fn run(self, next_packet: Option<Packet<V>>) -> StateResult<Server<Follower, C, V>, V> {
         let this = Arc::new(self);
 
         //
@@ -139,8 +139,8 @@ impl<C: Connection> Server<Leader, C> {
     }
 }
 
-impl<C: Connection> From<Server<Candidate, C>> for Server<Leader, C> {
-    fn from(candidate: Server<Candidate, C>) -> Self {
+impl<C: Connection<V>, V> From<Server<Candidate, C, V>> for Server<Leader, C, V> {
+    fn from(candidate: Server<Candidate, C, V>) -> Self {
 
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);

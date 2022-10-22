@@ -1,18 +1,18 @@
-use std::{sync::{atomic::Ordering, Arc}};
+use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{warn, info, debug, Instrument, Span, field};
 use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
 
-impl<C: Connection> Server<Candidate, C> {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
+impl<C: Connection<V>, V> Server<Candidate, C, V> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
         Ok(HandlePacketAction::MaintainState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         use PacketType::*;
 
         match packet.message_type {
@@ -27,7 +27,7 @@ impl<C: Connection> Server<Candidate, C> {
         }
     }
 
-    async fn handle_voteresponse(&self, packet: &Packet) -> Result<HandlePacketAction> {
+    async fn handle_voteresponse(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term != current_term {
             warn!(?packet.peer, ?packet.term, "got a vote response for the wrong term");
@@ -101,7 +101,7 @@ impl<C: Connection> Server<Candidate, C> {
             state = %self.state,
         ),
     )]
-    pub(super) async fn run(self, next_packet: Option<Packet>) -> StateResult<ElectionResult<C>> {
+    pub(super) async fn run(self, next_packet: Option<Packet<V>>) -> StateResult<ElectionResult<C, V>, V> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -123,8 +123,8 @@ impl<C: Connection> Server<Candidate, C> {
     }
 }
 
-impl<C: Connection> From<Server<Follower, C>> for Server<Candidate, C> {
-    fn from(follower: Server<Follower, C>) -> Self {
+impl<C: Connection<V>, V> From<Server<Follower, C, V>> for Server<Candidate, C, V> {
+    fn from(follower: Server<Follower, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(follower.config.election_timeout_min, follower.config.election_timeout_max);
         Self {
             connection: follower.connection,

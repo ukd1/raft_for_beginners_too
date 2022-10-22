@@ -6,14 +6,14 @@ use crate::{connection::{Connection, Packet, PacketType}, journal::JournalEntry}
 
 use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, HandlePacketAction, StateResult, ServerHandle};
 
-impl<C: Connection> Server<Follower, C> {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction> {
+impl<C: Connection<V>, V> Server<Follower, C, V> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
         warn!("Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet) -> Result<HandlePacketAction> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         use PacketType::*;
 
         match packet.message_type {
@@ -24,7 +24,7 @@ impl<C: Connection> Server<Follower, C> {
         }
     }
 
-    async fn handle_voterequest(&self, packet: &Packet) -> Result<HandlePacketAction> {
+    async fn handle_voterequest(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
         let current_term = self.term.load(Ordering::Acquire);
         let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
             PacketType::VoteRequest { last_log_index, last_log_term } => (*last_log_index, *last_log_term),
@@ -77,7 +77,7 @@ impl<C: Connection> Server<Follower, C> {
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn handle_appendentries(&self, packet: &Packet) -> Result<HandlePacketAction> {
+    async fn handle_appendentries(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
         let current_term = self.term.load(Ordering::Acquire);
 
         let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
@@ -104,7 +104,7 @@ impl<C: Connection> Server<Follower, C> {
 
         let match_index = if ack {
             for (packet_entry_idx, packet_entry) in entries.iter().enumerate() {
-                let maybe_existing: Option<(u64, JournalEntry)> = prev_log_index
+                let maybe_existing: Option<(u64, JournalEntry<V>)> = prev_log_index
                     .map(|prev_log_index| prev_log_index + (packet_entry_idx as u64) + 1)
                     .and_then(|i| Some(i).zip(self.journal.get(i)));
 
@@ -151,13 +151,13 @@ impl<C: Connection> Server<Follower, C> {
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn run(self, handoff_packet: Option<Packet>) -> StateResult<Server<Candidate, C>> {
+    async fn run(self, handoff_packet: Option<Packet<V>>) -> StateResult<Server<Candidate, C, V>, V> {
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((Server::<Candidate, C>::from(this), packet_for_candidate))
+        Ok((Server::<Candidate, C, V>::from(this), packet_for_candidate))
     }
 
     pub fn start(connection: C, config: crate::config::Config) -> ServerHandle {
@@ -184,8 +184,8 @@ impl<C: Connection> Server<Follower, C> {
     }
 }
 
-impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
-    fn from(candidate: Server<Candidate, C>) -> Self {
+impl<C: Connection<V>, V> From<Server<Candidate, C, V>> for Server<Follower, C, V> {
+    fn from(candidate: Server<Candidate, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(candidate.config.election_timeout_min, candidate.config.election_timeout_max);
         Self {
             connection: candidate.connection,
@@ -197,8 +197,8 @@ impl<C: Connection> From<Server<Candidate, C>> for Server<Follower, C> {
     }
 }
 
-impl<C: Connection> From<Server<Leader, C>> for Server<Follower, C> {
-    fn from(leader: Server<Leader, C>) -> Self {
+impl<C: Connection<V>, V> From<Server<Leader, C, V>> for Server<Follower, C, V> {
+    fn from(leader: Server<Leader, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(leader.config.election_timeout_min, leader.config.election_timeout_max);
         Self {
             connection: leader.connection,
