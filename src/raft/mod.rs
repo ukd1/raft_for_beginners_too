@@ -15,7 +15,7 @@ use tracing::{info, debug, warn, info_span, Instrument};
 
 use state::ServerState;
 
-use crate::journal::Journal;
+use crate::journal::{Journal, JournalValue};
 use crate::connection::{ConnectionError, Packet, Connection};
 
 use self::state::{Follower, Candidate, Leader};
@@ -35,7 +35,12 @@ pub enum ServerError {
 }
 
 #[derive(Debug)]
-pub struct Server<S: ServerState, C: Connection<V>, V> {
+pub struct Server<S, C, V>
+where
+    S: ServerState,
+    C: Connection<V>,
+    V: JournalValue,
+{
     connection: C,
     config: crate::config::Config,
     journal: Journal<V>,
@@ -43,18 +48,26 @@ pub struct Server<S: ServerState, C: Connection<V>, V> {
     pub term: AtomicU64,
 }
 
-enum ServerImpl<'s, C: Connection<V>, V> {
+enum ServerImpl<'s, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     Follower(&'s Server<Follower, C, V>),
     Candidate(&'s Server<Candidate, C, V>),
     Leader(&'s Server<Leader, C, V>),
 }
 
-pub(crate) enum HandlePacketAction<V> {
+pub(crate) enum HandlePacketAction<V: JournalValue> {
     MaintainState(Option<Packet<V>>),
     ChangeState(Option<Packet<V>>),
 }
 
-impl<C: Connection<V>, V> ServerImpl<'_, C, V> {
+impl<C, V> ServerImpl<'_, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     pub async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
@@ -72,7 +85,12 @@ impl<C: Connection<V>, V> ServerImpl<'_, C, V> {
     }
 }
 
-impl<S: ServerState, C: Connection<V>, V> Server<S, C, V> {
+impl<S, C, V> Server<S, C, V>
+where
+    S: ServerState,
+    C: Connection<V>,
+    V: JournalValue,
+{
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
         let min = min.as_millis() as u64;
         let max = max.as_millis() as u64;

@@ -1,10 +1,14 @@
 use std::sync::{atomic::Ordering, Arc};
 
 use tracing::{warn, info, debug, Instrument, Span, field};
-use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}};
+use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}, journal::JournalValue};
 use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
 
-impl<C: Connection<V>, V> Server<Candidate, C, V> {
+impl<C, V> Server<Candidate, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
@@ -123,7 +127,11 @@ impl<C: Connection<V>, V> Server<Candidate, C, V> {
     }
 }
 
-impl<C: Connection<V>, V> From<Server<Follower, C, V>> for Server<Candidate, C, V> {
+impl<C, V> From<Server<Follower, C, V>> for Server<Candidate, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     fn from(follower: Server<Follower, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(follower.config.election_timeout_min, follower.config.election_timeout_max);
         Self {

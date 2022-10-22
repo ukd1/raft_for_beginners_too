@@ -3,11 +3,15 @@ use std::{sync::{atomic::Ordering, Arc}, collections::HashMap};
 use tokio::time::timeout;
 use tracing::{debug, trace};
 
-use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction};
+use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction, journal::JournalValue};
 
 use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult};
 
-impl<C: Connection<V>, V> Server<Leader, C, V> {
+impl<C, V> Server<Leader, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
         use PacketType::*;
 
@@ -19,9 +23,9 @@ impl<C: Connection<V>, V> Server<Leader, C, V> {
     }
 
     // TODO: this should take a Packet with PacketType::ClientRequest
-    async fn handle_clientrequest(&self, cmd: String) {
+    pub async fn handle_clientrequest(&self, value: V) {
         let current_term = self.term.load(Ordering::SeqCst);
-        let index = self.journal.append(current_term, cmd);
+        let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
         // is counted correctly; next_index just to be correct
         let leader_addr = self.connection.address();
@@ -65,30 +69,10 @@ impl<C: Connection<V>, V> Server<Leader, C, V> {
     pub(super) async fn run(self, next_packet: Option<Packet<V>>) -> StateResult<Server<Follower, C, V>, V> {
         let this = Arc::new(self);
 
-        //
-        // DEBUG: test client events generator
-        //
-        let test_request_handle = {
-            let this = Arc::clone(&this);
-            tokio::spawn(async move {
-                let mut i = 0;
-                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
-                loop {
-                    i += 1;
-                    ticker.tick().await;
-                    this.handle_clientrequest(format!("{}", i)).await;
-                    tracing::info!(%i, last_index = ?this.journal.last_index(), "test request added to journal");
-                }
-            })
-        };
-        //
-        // END DEBUG
-        //
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
         let incoming_loop_result = tokio::spawn(Arc::clone(&this).main(next_packet)).await;
         // 1. Shut down heartbeat_loop as soon as incoming_loop is done
         heartbeat_handle.abort();
-        test_request_handle.abort(); // DEBUG: shutdown test client events generator
         // 2. Raise any error from the incoming loop
         let packet_for_next_state = incoming_loop_result??;
         // 3. incoming_loop exited without error, so wait for
@@ -139,7 +123,11 @@ impl<C: Connection<V>, V> Server<Leader, C, V> {
     }
 }
 
-impl<C: Connection<V>, V> From<Server<Candidate, C, V>> for Server<Leader, C, V> {
+impl<C, V> From<Server<Candidate, C, V>> for Server<Leader, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     fn from(candidate: Server<Candidate, C, V>) -> Self {
 
         // figure out match index

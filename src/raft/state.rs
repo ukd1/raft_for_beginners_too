@@ -2,7 +2,7 @@ use std::{collections::{HashMap, BTreeMap}, sync::{RwLock, Mutex}, any::Any, fmt
 use tokio::time::Instant;
 use tracing::{debug, trace};
 
-use crate::connection::{ServerAddress, Connection};
+use crate::{connection::{ServerAddress, Connection}, journal::JournalValue};
 
 use super::Server;
 
@@ -178,7 +178,11 @@ impl Display for Leader {
     }
 }
 
-pub enum ElectionResult<C: Connection<V>, V> {
+pub enum ElectionResult<C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     Follower(Server<Follower, C, V>),
     Leader(Server<Leader, C, V>),
 }

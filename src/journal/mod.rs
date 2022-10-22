@@ -1,10 +1,10 @@
-use std::{sync::{RwLock, atomic::{AtomicUsize, Ordering}}, fmt::{self, Display}};
+use std::{sync::{RwLock, atomic::{AtomicUsize, Ordering}}, fmt::{self, Debug, Display}};
 
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, de::DeserializeOwned};
 use tokio::sync::watch;
 use tracing::{warn, trace};
 
-impl<V> Journal<V> {
+impl<V: JournalValue> Journal<V> {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<V>>> {
         self.entries.read().expect("Journal lock was posioned")
     }
@@ -111,14 +111,14 @@ impl<V> Journal<V> {
 
 
 #[derive(Debug, Serialize)]
-pub struct Journal<V> {
+pub struct Journal<V: JournalValue> {
     entries: RwLock<Vec<JournalEntry<V>>>,
     pub commit_index: AtomicUsize,
     #[serde(skip)]
     change_sender: watch::Sender<()>,
 }
 
-impl<V> Display for Journal<V> {
+impl<V: JournalValue> Display for Journal<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let json_value = serde_json::to_value(self)
             .map_err(|_| fmt::Error::default())?;
@@ -126,7 +126,7 @@ impl<V> Display for Journal<V> {
     }
 }
 
-impl<V> Default for Journal<V> {
+impl<V: JournalValue> Default for Journal<V> {
     fn default() -> Self {
         let (sender, _) = watch::channel(());
         Self {
@@ -138,12 +138,20 @@ impl<V> Default for Journal<V> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JournalEntry<V> {
+pub struct JournalEntry<V: JournalValue> {
     pub term: u64, // TODO make these a u32
+    #[serde(bound = "V: DeserializeOwned")]
     pub value: V,
-}   
+}
 
-pub struct JournalUpdate<V> {
+pub trait JournalValue: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static {}
+
+impl<T> JournalValue for T
+where
+    T: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static
+{}
+
+pub struct JournalUpdate<V: JournalValue> {
     pub prev_term: u64, // TODO make these a u32
     pub prev_index: Option<u64>, // TODO make these a u32
     pub entries: Vec<JournalEntry<V>>,

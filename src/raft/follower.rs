@@ -2,11 +2,15 @@ use std::{sync::{Arc, atomic::Ordering}, cmp};
 
 use tracing::{info, warn, debug};
 
-use crate::{connection::{Connection, Packet, PacketType}, journal::JournalEntry};
+use crate::{connection::{Connection, Packet, PacketType}, journal::{JournalEntry, JournalValue}};
 
 use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, HandlePacketAction, StateResult, ServerHandle};
 
-impl<C: Connection<V>, V> Server<Follower, C, V> {
+impl<C, V> Server<Follower, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
         warn!("Follower timeout");
         // Advance to Candidate state on timeout
@@ -118,7 +122,7 @@ impl<C: Connection<V>, V> Server<Follower, C, V> {
                     }
                 } else {
                     // 4. Append any new entries not already in the logs
-                    let new_entry_idx = self.journal.append_entry(packet_entry.to_owned());
+                    let new_entry_idx = self.journal.append_entry(packet_entry.clone());
                     debug!(index = %new_entry_idx, ?packet_entry, "appended entry to journal");
                 }
             }
@@ -184,7 +188,11 @@ impl<C: Connection<V>, V> Server<Follower, C, V> {
     }
 }
 
-impl<C: Connection<V>, V> From<Server<Candidate, C, V>> for Server<Follower, C, V> {
+impl<C, V> From<Server<Candidate, C, V>> for Server<Follower, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     fn from(candidate: Server<Candidate, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(candidate.config.election_timeout_min, candidate.config.election_timeout_max);
         Self {
@@ -197,7 +205,11 @@ impl<C: Connection<V>, V> From<Server<Candidate, C, V>> for Server<Follower, C, 
     }
 }
 
-impl<C: Connection<V>, V> From<Server<Leader, C, V>> for Server<Follower, C, V> {
+impl<C, V> From<Server<Leader, C, V>> for Server<Follower, C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
     fn from(leader: Server<Leader, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(leader.config.election_timeout_min, leader.config.election_timeout_max);
         Self {

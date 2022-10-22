@@ -10,7 +10,7 @@ pub struct UdpConnection {
 }
 
 #[async_trait]
-impl<V> Connection<V> for UdpConnection {
+impl<V: JournalValue> Connection<V> for UdpConnection {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
         let socket = UdpSocket::bind(bind_socket.0).await?;
@@ -33,7 +33,7 @@ impl<V> Connection<V> for UdpConnection {
         let (bytes_received, peer_addr) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(bytes_received);
 
-        let mut packet: Packet = rmp_serde::from_slice(&buf)
+        let mut packet: Packet<V> = rmp_serde::from_slice(&buf)
             .map_err(Box::from)
             .map_err(ConnectionError::Decoding)?;
         trace!(?peer_addr, ?packet, "receive");
