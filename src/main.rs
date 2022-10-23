@@ -6,7 +6,6 @@ mod journal;
 use clap::Parser;
 
 use crate::config::Config;
-use crate::connection::Connection;
 use crate::connection::udp::UdpConnection;
 use crate::raft::{Result, Server, ServerError};
 
@@ -38,8 +37,8 @@ async fn main() -> Result<()> {
     // assert_lesser_than!(opts.election_timeout_min, opts.election_timeout_max);
 
     // TODO: find out how to make the types here less nasty
-    let connection = <UdpConnection as Connection<String>>::bind(opts.listen_socket.clone()).await?;
-    let server_handle = Server::<_, _, String>::start(connection, opts);
+    let connection = UdpConnection::bind::<String>(opts.listen_socket.clone()).await?;
+    let server_handle = Server::start(connection, opts);
     //
     // DEBUG: test client events generator
     // TODO: only do this when state == Leader

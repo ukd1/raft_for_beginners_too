@@ -9,6 +9,12 @@ pub struct UdpConnection {
     socket: UdpSocket,
 }
 
+impl UdpConnection {
+    pub async fn bind<V: JournalValue>(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
+        <UdpConnection as Connection<V>>::bind(bind_socket).await
+    }
+}
+
 #[async_trait]
 impl<V: JournalValue> Connection<V> for UdpConnection {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
