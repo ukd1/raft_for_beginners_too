@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use async_trait::async_trait;
 use tracing::trace;
 use tokio::net::UdpSocket;
@@ -5,23 +7,19 @@ use tokio::net::UdpSocket;
 use super::*;
 
 #[derive(Debug)]
-pub struct UdpConnection {
+pub struct UdpConnection<V> {
     socket: UdpSocket,
-}
-
-impl UdpConnection {
-    pub async fn bind<V: JournalValue>(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
-        <UdpConnection as Connection<V>>::bind(bind_socket).await
-    }
+    _value: PhantomData<V>,
 }
 
 #[async_trait]
-impl<V: JournalValue> Connection<V> for UdpConnection {
+impl<V: JournalValue> Connection<V> for UdpConnection<V> {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
         let socket = UdpSocket::bind(bind_socket.0).await?;
         Ok(Self {
             socket,
+            _value: Default::default(),
         }) // TODO
     }
 

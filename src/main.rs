@@ -6,7 +6,7 @@ mod journal;
 use clap::Parser;
 
 use crate::config::Config;
-use crate::connection::udp::UdpConnection;
+use crate::connection::{Connection, udp::UdpConnection};
 use crate::raft::{Result, Server, ServerError};
 
 #[tokio::main]
@@ -36,8 +36,7 @@ async fn main() -> Result<()> {
     // assert_lesser_than!(opts.heartbeat_interval, opts.election_timeout_min);
     // assert_lesser_than!(opts.election_timeout_min, opts.election_timeout_max);
 
-    // TODO: find out how to make the types here less nasty
-    let connection = UdpConnection::bind::<String>(opts.listen_socket.clone()).await?;
+    let connection = UdpConnection::bind(opts.listen_socket.clone()).await?;
     let server_handle = Server::start(connection, opts);
     //
     // DEBUG: test client events generator
