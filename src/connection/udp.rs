@@ -20,7 +20,7 @@ impl<V: JournalValue> Connection<V> for UdpConnection<V> {
         Ok(Self {
             socket,
             _value: Default::default(),
-        }) // TODO
+        })
     }
 
     async fn send(&self, packet: Packet<V>) -> Result<(), ConnectionError> {
@@ -29,7 +29,7 @@ impl<V: JournalValue> Connection<V> for UdpConnection<V> {
             .map_err(Box::from)
             .map_err(ConnectionError::Encoding)?;
         self.socket.send_to(&data, packet.peer.0).await?;
-        Ok(()) // TODO
+        Ok(())
     }
 
     async fn receive(&self) -> Result<Packet<V>, ConnectionError> {
@@ -41,8 +41,8 @@ impl<V: JournalValue> Connection<V> for UdpConnection<V> {
             .map_err(Box::from)
             .map_err(ConnectionError::Decoding)?;
         trace!(?peer_addr, ?packet, "receive");
+
         // Change the peer field to be the received peer's, not the one it sent
-        // TODO: this is wrong and bad to tamper with wire data
         packet.peer = peer_addr.into();
         Ok(packet)
     }

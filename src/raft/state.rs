@@ -1,5 +1,5 @@
-use std::{collections::{HashMap, BTreeMap}, sync::{RwLock, Mutex}, any::Any, fmt::{Debug, Display}};
-use tokio::time::Instant;
+use std::{collections::{HashMap, BTreeMap, VecDeque}, sync::{RwLock, Mutex}, any::Any, fmt::{Debug, Display}};
+use tokio::{time::Instant, sync::oneshot};
 use tracing::{debug, trace};
 
 use crate::{connection::{ServerAddress, Connection}, journal::JournalValue};
@@ -170,6 +170,7 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
 pub struct Leader {
     pub next_index: PeerIndices,
     pub match_index: PeerIndices,
+    pub requests: Mutex<VecDeque<(u64, oneshot::Sender<()>)>>,
 }
 
 impl Display for Leader {

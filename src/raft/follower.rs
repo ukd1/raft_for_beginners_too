@@ -1,6 +1,6 @@
 use std::{sync::{Arc, atomic::Ordering}, cmp};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{info, warn, debug};
 
 use crate::{connection::{Connection, Packet, PacketType}, journal::{JournalEntry, JournalValue}};
@@ -168,6 +168,7 @@ where
     pub fn start(connection: C, config: crate::config::Config) -> ServerHandle<V> {
         let timeout = Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
+        let (state_tx, state_rx) = watch::channel(());
         let join_h = tokio::spawn(async move {
             let mut follower = Self {
                 connection,
@@ -176,6 +177,7 @@ where
                 journal: Default::default(),
                 term: 0.into(),
                 state: Follower::new(timeout),
+                state_tx,
             };
             let mut packet = None;
             let mut candidate;
@@ -188,7 +190,7 @@ where
                 };
             }
         });
-        ServerHandle::new(join_h, requests_tx)
+        ServerHandle::new(join_h, requests_tx, state_rx)
     }
 }
 
@@ -206,6 +208,7 @@ where
             term: candidate.term,
             journal: candidate.journal,
             state: Follower::new(timeout),
+            state_tx: candidate.state_tx,
         }
     }
 }
@@ -224,6 +227,7 @@ where
             term: leader.term,
             journal: leader.journal,
             state: Follower::new(timeout),
+            state_tx: leader.state_tx,
         }
     }
 }

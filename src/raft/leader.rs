@@ -1,11 +1,11 @@
 use std::{sync::{atomic::Ordering, Arc}, collections::HashMap};
 
-use tokio::time::timeout;
-use tracing::{debug, trace};
+use tokio::{time::timeout, sync::oneshot};
+use tracing::{debug, trace, warn};
 
 use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction, journal::JournalValue};
 
-use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult};
+use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult, ServerError};
 
 impl<C, V> Server<Leader, C, V>
 where
@@ -22,7 +22,6 @@ where
         }
     }
 
-    // TODO: this should take a Packet with PacketType::ClientRequest
     pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
@@ -31,8 +30,21 @@ where
         let leader_addr = self.connection.address();
         self.state.next_index.set(&leader_addr, Some(index + 1));
         self.state.match_index.set(&leader_addr, Some(index));
-        // TODO: don't respond until value committed (or just replicated?)
-        Ok(())
+        let (response_tx, response_rx) = oneshot::channel();
+        {
+            let mut requests = self.state.requests.lock()
+                .expect("requests lock poisoned");
+            requests
+                .push_back((index, response_tx));
+            trace!(%index, "added client response sender to requests queue");
+        }
+
+        // TODO: apply entry to state machine and return result
+        //       remove clippy allow when implemented
+        #[allow(clippy::let_unit_value)]
+        let result = timeout(self.config.request_timeout, response_rx).await?
+            .map_err(|_| ServerError::RequestFailed)?;
+        Ok(result)
     }
 
     async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
@@ -46,7 +58,10 @@ where
                 self.state.next_index.set(&packet.peer, Some(match_index + 1));
                 self.state.match_index.set(&packet.peer, Some(match_index));
                 let commit_index = self.journal.commit_index();
-                if match_index > commit_index {
+                // Using the following match_index == commit_index == 0 logic
+                // instead of using an Option<u64> for the commit_index, because
+                // it allows us to use atomics inside journal instead of locking
+                if match_index > commit_index || (commit_index == 0 && match_index == commit_index) {
                     let quorum = self.quorum();
                     let quorum_index = self.state.match_index.greatest_quorum_index(quorum);
                     let current_term = self.term.load(Ordering::Acquire);
@@ -55,6 +70,28 @@ where
                     if match_index <= quorum_index && match_index_term == current_term {
                         self.journal.set_commit_index(match_index);
                         debug!(commit_index = %match_index, "updated commit index");
+
+                        {
+                            let mut requests = self.state.requests.lock()
+                                .expect("requests lock poisoned");
+                            loop {
+                                match requests.pop_front() {
+                                    Some((index, response_tx)) if index <= match_index => {
+                                        trace!(%index, "found response sender for committed value");
+                                        let result = response_tx.send(());
+                                        if result.is_err() {
+                                            warn!(%index, "client request dropped");
+                                        }
+                                    },
+                                    Some(r) => {
+                                        requests.push_front(r);
+                                        break;
+                                    },
+                                    None => break,
+                                };
+                            }
+                        }
+                            
                     }
                 }
             },
@@ -147,7 +184,9 @@ where
             state: Leader {
                 next_index,
                 match_index,
+                requests: Default::default(),
             },
+            state_tx: candidate.state_tx,
         }
     }
 }

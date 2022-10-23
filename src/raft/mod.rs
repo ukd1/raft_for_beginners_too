@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use pin_project::pin_project;
 use rand::Rng;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tokio::sync::{oneshot, mpsc};
 use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
-use tracing::{info, debug, warn, info_span, Instrument};
+use tracing::{info, debug, warn, info_span, Instrument, error};
 
 use state::ServerState;
 
@@ -34,11 +34,12 @@ pub struct ServerHandle<V> {
     #[pin]
     inner: Option<JoinHandle<Result<()>>>,
     requests: mpsc::Sender<ClientRequest<V>>,
+    state: watch::Receiver<()>, // TODO: enum for state
 }
 
 impl<V> ServerHandle<V> {
-    fn new(inner: JoinHandle<Result<()>>, requests: mpsc::Sender<ClientRequest<V>>) -> Self {
-        Self { inner: Some(inner), requests }
+    fn new(inner: JoinHandle<Result<()>>, requests: mpsc::Sender<ClientRequest<V>>, state: watch::Receiver<()>) -> Self {
+        Self { inner: Some(inner), requests, state }
     }
 
     pub async fn send(&self, value: V) -> Result<()> {
@@ -47,6 +48,12 @@ impl<V> ServerHandle<V> {
             .or(Err(ServerError::RequestFailed))?;
         response_rx.await
             .or(Err(ServerError::RequestFailed))?
+    }
+
+    pub async fn state_change(&self) {
+        let mut state = self.state.clone();
+        state.changed().await
+            .expect("state sender dropped")
     }
 }
 
@@ -65,7 +72,8 @@ impl<V> Clone for ServerHandle<V> {
     fn clone(&self) -> Self {
         Self {
             inner: None,
-            requests: self.requests.clone()
+            requests: self.requests.clone(),
+            state: self.state.clone(),
         }
     }
 }
@@ -80,6 +88,10 @@ pub enum ServerError {
     IntegerOverflow(#[from] std::num::TryFromIntError),
     #[error("client request failed")]
     RequestFailed,
+    #[error("client request timed out")]
+    RequestTimeout(#[from] tokio::time::error::Elapsed),
+    #[error("not cluster leader, can't accept requests")] // TODO: forward/redirect
+    NotLeader,
     #[error("ServerHandle cloned: can only await first handle")]
     HandleCloned,
 }
@@ -96,6 +108,7 @@ where
     config: crate::config::Config,
     journal: Journal<V>,
     pub state: S,
+    state_tx: watch::Sender<()>,
     pub term: AtomicU64,
 }
 
@@ -137,8 +150,8 @@ where
 
     pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
         match self {
-            ServerImpl::Follower(_) => Ok(()), // TODO: request forwarding or redirecting
-            ServerImpl::Candidate(_) => Ok(()), // TODO: request forwarding or redirecting
+            ServerImpl::Follower(_) => Err(ServerError::NotLeader), // TODO: request forwarding or redirecting
+            ServerImpl::Candidate(_) => Err(ServerError::NotLeader), // TODO: request forwarding or redirecting
             ServerImpl::Leader(l) => l.handle_clientrequest(value).await,
         }
     }
@@ -273,6 +286,8 @@ where
         let startup_span = info_span!("startup", term = %current_term, state = %self.state);
         if current_term > 0 {
             startup_span.in_scope(|| warn!("state change"));
+            self.state_tx.send(())
+                .expect("state change notification failed");
         }
 
         let mut main_tasks = JoinSet::new();
@@ -306,10 +321,20 @@ where
             let action = tokio::select! {
                 result = self.connection.receive() => self.handle_packet_downcast(result?).await?,
                 Some((request, response_h)) = client_requests.recv() => {
-                    // TODO: tokio::spawn requests
-                    let response = self.handle_request_downcast(request).await
-                        .map(|_| ());
-                    response_h.send(response).or(Err(ServerError::RequestFailed))?;
+                    let this = Arc::downgrade(&self);
+                    tokio::spawn(async move {
+                        match this.upgrade() {
+                            Some(this) => {
+                                let response = this.handle_request_downcast(request).await
+                                    .map(|_| ());
+                                let result = response_h.send(response);
+                                if result.is_err() {
+                                    error!("sending client response failed");
+                                }
+                            },
+                            None => warn!("server exited or changed state before client request completed"),
+                        }
+                    });
                     HandlePacketAction::MaintainState(None)
                 },
                 _ = timeout => self.handle_timeout_downcast().await?,

@@ -38,6 +38,10 @@ pub struct Config {
     /// Election max timeout in ms
     #[clap(long, parse(try_from_str = parse_millis), default_value = "300")]
     pub election_timeout_max: Duration,
+
+    /// Request timeout in ms
+    #[clap(long, parse(try_from_str = parse_millis), default_value = "30000")]
+    pub request_timeout: Duration,
 }
 
 fn parse_millis(s: &str) -> Result<Duration, ParseIntError> {

@@ -141,6 +141,7 @@ where
             term: follower.term,
             journal: follower.journal,
             state: Candidate::new(timeout),
+            state_tx: follower.state_tx,
         }
     }
 }
