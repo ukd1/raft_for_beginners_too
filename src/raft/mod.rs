@@ -4,11 +4,16 @@ mod leader;
 mod state;
 
 use std::any::Any;
+use std::future::Future;
+use std::task::Poll;
 use std::{result::Result as StdResult, sync::Arc};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use pin_project::pin_project;
 use rand::Rng;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
+use tokio::sync::{oneshot, mpsc};
 use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
 use tracing::{info, debug, warn, info_span, Instrument};
@@ -22,7 +27,48 @@ use self::state::{Follower, Candidate, Leader};
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 type StateResult<T, V> = Result<(T, Option<Packet<V>>)>;
-pub type ServerHandle = JoinHandle<Result<()>>;
+type ClientRequest<V> = (V, oneshot::Sender<Result<()>>);
+
+#[pin_project]
+pub struct ServerHandle<V> {
+    #[pin]
+    inner: Option<JoinHandle<Result<()>>>,
+    requests: mpsc::Sender<ClientRequest<V>>,
+}
+
+impl<V> ServerHandle<V> {
+    fn new(inner: JoinHandle<Result<()>>, requests: mpsc::Sender<ClientRequest<V>>) -> Self {
+        Self { inner: Some(inner), requests }
+    }
+
+    pub async fn send(&self, value: V) -> Result<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.requests.send((value, response_tx)).await
+            .or(Err(ServerError::RequestFailed))?;
+        response_rx.await
+            .or(Err(ServerError::RequestFailed))?
+    }
+}
+
+impl<V> Future for ServerHandle<V> {
+    type Output = <JoinHandle<Result<()>> as Future>::Output;
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+        match self.project().inner.as_pin_mut() {
+            Some(f) => f.poll(cx),
+            None => Poll::Ready(Ok(Err(ServerError::HandleCloned))),
+        }
+    }
+}
+
+impl<V> Clone for ServerHandle<V> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: None,
+            requests: self.requests.clone()
+        }
+    }
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum ServerError {
@@ -32,6 +78,10 @@ pub enum ServerError {
     TaskPanicked(#[from] tokio::task::JoinError),
     #[error("could not convert native integer to wire size")]
     IntegerOverflow(#[from] std::num::TryFromIntError),
+    #[error("client request failed")]
+    RequestFailed,
+    #[error("ServerHandle cloned: can only await first handle")]
+    HandleCloned,
 }
 
 #[derive(Debug)]
@@ -42,6 +92,7 @@ where
     V: JournalValue,
 {
     connection: C,
+    requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
     config: crate::config::Config,
     journal: Journal<V>,
     pub state: S,
@@ -81,6 +132,14 @@ where
             ServerImpl::Follower(f) => f.handle_timeout().await,
             ServerImpl::Candidate(c) => c.handle_timeout().await,
             ServerImpl::Leader(_) => unimplemented!("no Leader timeout"),
+        }
+    }
+
+    pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
+        match self {
+            ServerImpl::Follower(_) => Ok(()), // TODO: request forwarding or redirecting
+            ServerImpl::Candidate(_) => Ok(()), // TODO: request forwarding or redirecting
+            ServerImpl::Leader(l) => l.handle_clientrequest(value).await,
         }
     }
 }
@@ -142,6 +201,18 @@ where
         } else {
             unimplemented!("Invalid server state: {}", self.state);
         }
+    }
+
+    #[tracing::instrument(
+        name = "handle_request",
+        skip_all,
+        fields(
+            state = %self.state,
+        ),
+    )]
+
+    async fn handle_request_downcast(&self, value: V) -> Result<()> {
+        self.downcast().handle_clientrequest(value).await
     }
 
     #[tracing::instrument(
@@ -220,6 +291,7 @@ where
             }
         }
 
+        let mut client_requests = self.requests.lock().await;
         loop {
             let timeout = async {
                 if let Some(t) = self.state.get_timeout() {
@@ -233,6 +305,13 @@ where
 
             let action = tokio::select! {
                 result = self.connection.receive() => self.handle_packet_downcast(result?).await?,
+                Some((request, response_h)) = client_requests.recv() => {
+                    // TODO: tokio::spawn requests
+                    let response = self.handle_request_downcast(request).await
+                        .map(|_| ());
+                    response_h.send(response).or(Err(ServerError::RequestFailed))?;
+                    HandlePacketAction::MaintainState(None)
+                },
                 _ = timeout => self.handle_timeout_downcast().await?,
             };
             assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");

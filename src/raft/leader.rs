@@ -23,7 +23,7 @@ where
     }
 
     // TODO: this should take a Packet with PacketType::ClientRequest
-    pub async fn handle_clientrequest(&self, value: V) {
+    pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
@@ -31,6 +31,8 @@ where
         let leader_addr = self.connection.address();
         self.state.next_index.set(&leader_addr, Some(index + 1));
         self.state.match_index.set(&leader_addr, Some(index));
+        // TODO: don't respond until value committed (or just replicated?)
+        Ok(())
     }
 
     async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
@@ -138,6 +140,7 @@ where
 
         Self {
             connection: candidate.connection,
+            requests: candidate.requests,
             config: candidate.config,
             term: candidate.term,
             journal: candidate.journal,

@@ -1,5 +1,6 @@
 use std::{sync::{Arc, atomic::Ordering}, cmp};
 
+use tokio::sync::mpsc;
 use tracing::{info, warn, debug};
 
 use crate::{connection::{Connection, Packet, PacketType}, journal::{JournalEntry, JournalValue}};
@@ -164,11 +165,13 @@ where
         Ok((Server::<Candidate, C, V>::from(this), packet_for_candidate))
     }
 
-    pub fn start(connection: C, config: crate::config::Config) -> ServerHandle {
+    pub fn start(connection: C, config: crate::config::Config) -> ServerHandle<V> {
         let timeout = Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
-        tokio::spawn(async move {
+        let (requests_tx, requests_rx) = mpsc::channel(64);
+        let join_h = tokio::spawn(async move {
             let mut follower = Self {
                 connection,
+                requests: requests_rx.into(),
                 config,
                 journal: Default::default(),
                 term: 0.into(),
@@ -184,7 +187,8 @@ where
                     (ElectionResult::Follower(follower), packet) => (follower, packet),
                 };
             }
-        })
+        });
+        ServerHandle::new(join_h, requests_tx)
     }
 }
 
@@ -197,6 +201,7 @@ where
         let timeout = Self::generate_random_timeout(candidate.config.election_timeout_min, candidate.config.election_timeout_max);
         Self {
             connection: candidate.connection,
+            requests: candidate.requests,
             config: candidate.config,
             term: candidate.term,
             journal: candidate.journal,
@@ -214,6 +219,7 @@ where
         let timeout = Self::generate_random_timeout(leader.config.election_timeout_min, leader.config.election_timeout_max);
         Self {
             connection: leader.connection,
+            requests: leader.requests,
             config: leader.config,
             term: leader.term,
             journal: leader.journal,

@@ -136,6 +136,7 @@ where
         let timeout = Self::generate_random_timeout(follower.config.election_timeout_min, follower.config.election_timeout_max);
         Self {
             connection: follower.connection,
+            requests: follower.requests,
             config: follower.config,
             term: follower.term,
             journal: follower.journal,
