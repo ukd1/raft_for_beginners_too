@@ -1,7 +1,6 @@
 mod follower;
 mod candidate;
 mod leader;
-mod state;
 
 use std::any::Any;
 use std::future::Future;
@@ -18,16 +17,31 @@ use tokio::task::JoinSet;
 use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
 use tracing::{info, debug, warn, info_span, Instrument, error};
 
-use state::ServerState;
-
 use crate::journal::{Journal, JournalValue};
 use crate::connection::{ConnectionError, Packet, Connection};
 
-use self::state::{Follower, Candidate, Leader};
+use self::state::{ServerState, Follower, Candidate, Leader};
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 type StateResult<T, V> = Result<(T, Option<Packet<V>>)>;
 type ClientRequest<V> = (V, oneshot::Sender<Result<()>>);
+
+mod state {
+    use std::{fmt::{Debug, Display}, any::Any};
+
+    use tokio::time::Instant;
+
+    pub use super::{
+        follower::Follower,
+        candidate::Candidate,
+        leader::Leader,
+    };
+
+    pub trait ServerState: Debug + Display + Any + Send + Sync {
+        fn get_timeout(&self) -> Option<Instant>;
+        fn set_timeout(&self, timeout: Instant);
+    }
+}
 
 #[pin_project]
 pub struct ServerHandle<V> {

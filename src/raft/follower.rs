@@ -1,11 +1,60 @@
-use std::{sync::{Arc, atomic::Ordering}, cmp};
+use std::{sync::{Arc, atomic::Ordering, RwLock, Mutex}, cmp, fmt::Display};
 
-use tokio::sync::{mpsc, watch};
+use tokio::{sync::{mpsc, watch}, time::Instant};
 use tracing::{info, warn, debug};
 
-use crate::{connection::{Connection, Packet, PacketType}, journal::{JournalEntry, JournalValue}};
+use crate::{connection::{Connection, Packet, PacketType, ServerAddress}, journal::{JournalEntry, JournalValue}};
 
-use super::{Result, Server, state::{Follower, ElectionResult, Candidate, Leader}, HandlePacketAction, StateResult, ServerHandle};
+use super::{Result, Server, candidate::ElectionResult, state::{Candidate, Leader, ServerState}, HandlePacketAction, StateResult, ServerHandle};
+
+#[derive(Debug)]
+pub struct Follower {
+    pub timeout: RwLock<Instant>,
+    pub voted_for: Mutex<Ballot>,
+}
+
+impl ServerState for Follower {
+    fn get_timeout(&self) -> Option<Instant> {
+        Some(*self.timeout.read().expect("RwLock poisoned"))
+    }
+    fn set_timeout(&self, timeout: Instant) {
+        *self.timeout.write().expect("RwLock poisoned") = timeout;
+    }
+}
+
+impl Display for Follower {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Follower")
+    }
+}
+
+impl Follower {
+    pub fn new(timeout: Instant) -> Self {
+        Self {
+            timeout: RwLock::new(timeout),
+            voted_for: Default::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct Ballot {
+    term: u64,
+    choice: Option<ServerAddress>,
+}
+
+impl Ballot {
+    pub fn cast_vote(&mut self, vote_term: u64, vote_choice: &ServerAddress) -> bool {
+        // If the term has changed or we haven't voted in this term
+        if self.term != vote_term || self.choice.is_none() {
+                self.term = vote_term;
+                self.choice = Some(vote_choice.clone());
+                return true;
+        }
+
+        self.choice.as_ref() == Some(vote_choice)
+    }
+}
 
 impl<C, V> Server<Follower, C, V>
 where

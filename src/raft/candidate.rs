@@ -1,8 +1,74 @@
-use std::sync::{atomic::Ordering, Arc};
+use std::{sync::{atomic::Ordering, Arc, RwLock, Mutex}, fmt::Display, collections::HashMap};
 
-use tracing::{warn, info, debug, Instrument, Span, field};
-use crate::{raft::state::Follower, connection::{Packet, PacketType, Connection}, journal::JournalValue};
-use super::{Result, Server, state::{Candidate, ElectionResult}, HandlePacketAction, StateResult};
+use tokio::time::Instant;
+use tracing::{warn, info, debug, Instrument, Span, field, trace};
+use crate::{connection::{Packet, PacketType, Connection, ServerAddress}, journal::JournalValue};
+use super::{Result, Server, HandlePacketAction, StateResult, state::{Follower, Leader, ServerState}};
+
+#[derive(Debug)]
+pub struct Candidate {
+    pub timeout: RwLock<Instant>,
+    pub votes: ElectionTally,
+}
+
+impl Candidate {
+    pub fn new(timeout: Instant) -> Self {
+        Self {
+            timeout: timeout.into(),
+            votes: ElectionTally::new(),
+        }
+    }
+}
+
+impl ServerState for Candidate {
+    fn get_timeout(&self) -> Option<Instant> {
+        Some(*self.timeout.read().expect("RwLock poisoned"))
+    }
+    fn set_timeout(&self, timeout: Instant) {
+        *self.timeout.write().expect("RwLock poisoned") = timeout;
+    }
+}
+
+impl Display for Candidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Candidate ({} votes)", self.votes.vote_count())
+    }
+}
+
+#[derive(Debug)]
+pub struct ElectionTally {
+    votes: Mutex<HashMap<ServerAddress, bool>>,
+}
+
+impl ElectionTally {
+    pub fn new() -> Self {
+        Self {
+            votes: Mutex::new(HashMap::new()),
+        }
+    }
+    pub fn record_vote(&self, peer: &ServerAddress, is_granted: bool) {
+        let mut election_results = self.votes.lock().expect("votes Mutex poisoned");
+
+        // store the result from the vote
+        debug!(peer = ?peer, ?is_granted, "vote recorded");
+        election_results.insert(peer.to_owned(), is_granted);
+    }
+
+    pub fn vote_count(&self) -> usize {
+        let election_results = self.votes.lock().expect("votes Mutex poisoned");
+        trace!(votes = ?*election_results, "vote count");
+        election_results.values().filter(|v| **v).count()
+    }
+}
+
+pub enum ElectionResult<C, V>
+where
+    C: Connection<V>,
+    V: JournalValue,
+{
+    Follower(Server<Follower, C, V>),
+    Leader(Server<Leader, C, V>),
+}
 
 impl<C, V> Server<Candidate, C, V>
 where

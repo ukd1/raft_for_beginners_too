@@ -1,11 +1,107 @@
-use std::{sync::{atomic::Ordering, Arc}, collections::HashMap};
+use std::{sync::{atomic::Ordering, Arc, Mutex, RwLock}, collections::{HashMap, BTreeMap, VecDeque}, fmt::Display};
 
-use tokio::{time::timeout, sync::oneshot};
+use tokio::{time::{timeout, Instant}, sync::oneshot};
 use tracing::{debug, trace, warn};
 
-use crate::{connection::{PacketType, Packet, Connection}, raft::HandlePacketAction, journal::JournalValue};
+use crate::{connection::{PacketType, Packet, Connection, ServerAddress}, raft::HandlePacketAction, journal::JournalValue};
 
-use super::{Result, Server, state::{Leader, Follower, Candidate, PeerIndices}, StateResult, ServerError};
+use super::{Result, Server, state::{ServerState, Follower, Candidate}, StateResult, ServerError};
+
+#[derive(Debug)]
+pub struct Leader {
+    pub next_index: PeerIndices,
+    pub match_index: PeerIndices,
+    pub requests: Mutex<VecDeque<(u64, oneshot::Sender<()>)>>,
+}
+
+impl ServerState for Leader {
+    fn get_timeout(&self) -> Option<Instant> {
+        None
+    }
+    fn set_timeout(&self, _: Instant) {
+        unimplemented!("Leader doesn't have timeout");
+    }
+}
+
+impl Display for Leader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Leader")
+    }
+}
+
+#[derive(Debug)]
+pub struct PeerIndices(RwLock<HashMap<ServerAddress, Option<u64>>>);
+
+impl PeerIndices {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, Option<u64>>> {
+        self.0.read().expect("PeerIndices lock was posioned")
+    }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, Option<u64>>> {
+        self.0.write().expect("PeerIndices lock was posioned")
+    }
+
+    pub fn get(&self, peer: &ServerAddress) -> Option<u64> {
+        self.read().get(peer)
+            .copied()
+            .flatten()
+    }
+
+    pub fn set(&self, peer: &ServerAddress, index: Option<u64>) {
+        self.write().insert(peer.clone(), index);
+    }
+
+    pub fn decrement(&self, peer: &ServerAddress) {
+        let mut map = self.write();
+        let new_index = map.get(peer)
+            .copied()
+            .flatten()
+            .and_then(|i| i.checked_sub(1));
+        map.insert(peer.clone(), new_index);
+    }
+
+    /// Get the highest index for which a quorum of nodes
+    /// exists
+    /// 
+    /// Parameters:
+    /// quorum - the number of nodes required to establish a majority
+    pub fn greatest_quorum_index(&self, quorum: usize) -> u64 {
+        let map = self.read();
+        
+        let mut index_counts: BTreeMap<u64, usize> = BTreeMap::new();
+        for index in map.iter().filter_map(|(_, opt_i)| opt_i.as_ref()) {
+            let count = index_counts.entry(*index)
+                .and_modify(|cnt| *cnt += 1)
+                .or_insert(1);
+
+            // Early return if any one index value
+            // has quorum
+            if *count >= quorum {
+                return *index;
+            } 
+        }
+
+        // In highest to lowest index order (rev), sum the count
+        // of nodes whose index is the current value or higher
+        let mut greatest_quorum_index_count = 0;
+        for (index, count) in index_counts.into_iter().rev() {
+            greatest_quorum_index_count += count;
+            if greatest_quorum_index_count >= quorum {
+                return index;
+            }
+        }
+
+        // If there was no quorum, return index 0
+        0
+    }
+}
+
+impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
+    fn from_iter<T: IntoIterator<Item = (ServerAddress, Option<u64>)>>(iter: T) -> Self {
+        let inner: HashMap<ServerAddress, Option<u64>> = iter.into_iter().collect();
+        Self(inner.into())
+    }
+}
 
 impl<C, V> Server<Leader, C, V>
 where
