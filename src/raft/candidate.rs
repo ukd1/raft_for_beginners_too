@@ -1,9 +1,19 @@
-use std::{sync::{atomic::Ordering, Arc, RwLock, Mutex}, fmt::Display, collections::HashMap};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+};
 
+use super::{
+    state::{Follower, Leader, ServerState},
+    HandlePacketAction, Result, Server, StateResult,
+};
+use crate::{
+    connection::{Connection, Packet, PacketType, ServerAddress},
+    journal::JournalValue,
+};
 use tokio::time::Instant;
-use tracing::{warn, info, debug, Instrument, Span, field, trace};
-use crate::{connection::{Packet, PacketType, Connection, ServerAddress}, journal::JournalValue};
-use super::{Result, Server, HandlePacketAction, StateResult, state::{Follower, Leader, ServerState}};
+use tracing::{debug, field, info, trace, warn, Instrument, Span};
 
 #[derive(Debug)]
 pub struct Candidate {
@@ -93,7 +103,9 @@ where
             }))),
             VoteResponse { .. } => self.handle_voteresponse(&packet).await,
             // Candidates ignore these packets
-            AppendEntries { .. } | AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)),
+            AppendEntries { .. } | AppendEntriesAck { .. } => {
+                Ok(HandlePacketAction::MaintainState(None))
+            }
         }
     }
 
@@ -104,7 +116,11 @@ where
             return Ok(HandlePacketAction::MaintainState(None));
         }
 
-        let is_granted = if let Packet { message_type: PacketType::VoteResponse { is_granted }, .. } = packet {
+        let is_granted = if let Packet {
+            message_type: PacketType::VoteResponse { is_granted },
+            ..
+        } = packet
+        {
             *is_granted
         } else {
             unreachable!("handle_voteresponse called with a non-VoteResponse packet");
@@ -146,14 +162,20 @@ where
         // https://github.com/tokio-rs/tracing/issues/2334
         Span::current().record("term", current_term);
         let last_log_index = self.journal.last_index();
-        let last_log_term = last_log_index.and_then(|i| self.journal.get(i)).map(|e| e.term).unwrap_or(0);
+        let last_log_term = last_log_index
+            .and_then(|i| self.journal.get(i))
+            .map(|e| e.term)
+            .unwrap_or(0);
 
         self.reset_term_timeout().await;
         info!("starting new election");
 
         for peer in &self.config.peers {
             let peer_request = Packet {
-                message_type: PacketType::VoteRequest { last_log_index, last_log_term },
+                message_type: PacketType::VoteRequest {
+                    last_log_index,
+                    last_log_term,
+                },
                 term: current_term,
                 peer: peer.to_owned(),
             };
@@ -171,7 +193,10 @@ where
             state = %self.state,
         ),
     )]
-    pub(super) async fn run(self, next_packet: Option<Packet<V>>) -> StateResult<ElectionResult<C, V>, V> {
+    pub(super) async fn run(
+        self,
+        next_packet: Option<Packet<V>>,
+    ) -> StateResult<ElectionResult<C, V>, V> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -179,8 +204,14 @@ where
             // ...send a voterequest packet to all peers, then...
             let this_election = Arc::clone(&this);
             let current_span = Span::current();
-            tokio::spawn(async move { this_election.start_election().instrument(current_span).await }).await??; // TODO: add timeout
-            // ...await task results.
+            tokio::spawn(async move {
+                this_election
+                    .start_election()
+                    .instrument(current_span)
+                    .await
+            })
+            .await??; // TODO: add timeout
+                      // ...await task results.
             loop_h.await??
         };
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
@@ -199,7 +230,10 @@ where
     V: JournalValue,
 {
     fn from(follower: Server<Follower, C, V>) -> Self {
-        let timeout = Self::generate_random_timeout(follower.config.election_timeout_min, follower.config.election_timeout_max);
+        let timeout = Self::generate_random_timeout(
+            follower.config.election_timeout_min,
+            follower.config.election_timeout_max,
+        );
         Self {
             connection: follower.connection,
             requests: follower.requests,
@@ -211,4 +245,3 @@ where
         }
     }
 }
-

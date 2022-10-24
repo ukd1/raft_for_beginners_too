@@ -1,11 +1,25 @@
-use std::{sync::{Arc, atomic::Ordering, RwLock, Mutex}, cmp, fmt::Display};
+use std::{
+    cmp,
+    fmt::Display,
+    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+};
 
-use tokio::{sync::{mpsc, watch}, time::Instant};
-use tracing::{info, warn, debug};
+use tokio::{
+    sync::{mpsc, watch},
+    time::Instant,
+};
+use tracing::{debug, info, warn};
 
-use crate::{connection::{Connection, Packet, PacketType, ServerAddress}, journal::{JournalEntry, JournalValue}};
+use crate::{
+    connection::{Connection, Packet, PacketType, ServerAddress},
+    journal::{JournalEntry, JournalValue},
+};
 
-use super::{Result, Server, candidate::ElectionResult, state::{Candidate, Leader, ServerState}, HandlePacketAction, StateResult, ServerHandle};
+use super::{
+    candidate::ElectionResult,
+    state::{Candidate, Leader, ServerState},
+    HandlePacketAction, Result, Server, ServerHandle, StateResult,
+};
 
 #[derive(Debug)]
 pub struct Follower {
@@ -47,9 +61,9 @@ impl Ballot {
     pub fn cast_vote(&mut self, vote_term: u64, vote_choice: &ServerAddress) -> bool {
         // If the term has changed or we haven't voted in this term
         if self.term != vote_term || self.choice.is_none() {
-                self.term = vote_term;
-                self.choice = Some(vote_choice.clone());
-                return true;
+            self.term = vote_term;
+            self.choice = Some(vote_choice.clone());
+            return true;
         }
 
         self.choice.as_ref() == Some(vote_choice)
@@ -74,17 +88,21 @@ where
             VoteRequest { .. } => self.handle_voterequest(&packet).await,
             AppendEntries { .. } => self.handle_appendentries(&packet).await,
             // Followers ignore these packets
-            AppendEntriesAck { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
+            AppendEntriesAck { .. } | VoteResponse { .. } => {
+                Ok(HandlePacketAction::MaintainState(None))
+            }
         }
     }
 
     async fn handle_voterequest(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
         let current_term = self.term.load(Ordering::Acquire);
         let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
-            PacketType::VoteRequest { last_log_index, last_log_term } => (*last_log_index, *last_log_term),
+            PacketType::VoteRequest {
+                last_log_index,
+                last_log_term,
+            } => (*last_log_index, *last_log_term),
             _ => unreachable!("handle_voterequest called with non-PacketType::VoteRequest"),
         };
-
 
         let vote_granted = if packet.term == current_term {
             let our_last_log_index = self.journal.last_index();
@@ -96,17 +114,20 @@ where
                 // Candidate log is equally up-to-date as ours, so verify terms match;
                 // if both terms are None, then they match without checking the journal,
                 // because both Candidate and Follower journals are empty
-                cmp::Ordering::Equal => {
-                    candidate_last_log_index.map_or(true, |i| {
-                        self.journal.get(i)
-                            .filter(|e| e.term == candidate_last_log_term)
-                            .is_some()
-                    })
-                },
+                cmp::Ordering::Equal => candidate_last_log_index.map_or(true, |i| {
+                    self.journal
+                        .get(i)
+                        .filter(|e| e.term == candidate_last_log_term)
+                        .is_some()
+                }),
             };
 
             if candidate_log_valid {
-                let mut last_ballot = self.state.voted_for.lock().expect("voted_for Mutex poisoned");
+                let mut last_ballot = self
+                    .state
+                    .voted_for
+                    .lock()
+                    .expect("voted_for Mutex poisoned");
                 // Check if we have already voted for someone else in this term
                 last_ballot.cast_vote(packet.term, &packet.peer)
             } else {
@@ -121,9 +142,11 @@ where
         if vote_granted {
             self.reset_term_timeout().await;
         }
-        
+
         let reply = Packet {
-            message_type: PacketType::VoteResponse { is_granted: vote_granted },
+            message_type: PacketType::VoteResponse {
+                is_granted: vote_granted,
+            },
             term: current_term,
             peer: packet.peer.clone(),
         };
@@ -135,9 +158,12 @@ where
         let current_term = self.term.load(Ordering::Acquire);
 
         let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
-            PacketType::AppendEntries { prev_log_index, prev_log_term, entries, leader_commit} => (
-                *prev_log_index, prev_log_term, entries, leader_commit
-            ),
+            PacketType::AppendEntries {
+                prev_log_index,
+                prev_log_term,
+                entries,
+                leader_commit,
+            } => (*prev_log_index, prev_log_term, entries, leader_commit),
             _ => unreachable!("handle_appendentries called with non-PacketType::AppendEntries"),
         };
 
@@ -149,9 +175,11 @@ where
 
         let prev_log_matches = match prev_log_index {
             None => true,
-            Some(index) => self.journal.get(index)
+            Some(index) => self
+                .journal
+                .get(index)
                 .filter(|e| e.term == *prev_log_term)
-                .is_some()
+                .is_some(),
         };
 
         let ack = term_matches && prev_log_matches;
@@ -180,11 +208,17 @@ where
             // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
             let last_entry_index = self.journal.last_index();
             if let Some(last_entry_index) = last_entry_index {
-                let commit_index = self.journal.commit_index.load(Ordering::Acquire).try_into()?;
+                let commit_index = self
+                    .journal
+                    .commit_index
+                    .load(Ordering::Acquire)
+                    .try_into()?;
                 if *leader_commit > commit_index {
                     let commit_index = std::cmp::min(*leader_commit, last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    self.journal.commit_index.store(commit_index.try_into()?, Ordering::Release);
+                    self.journal
+                        .commit_index
+                        .store(commit_index.try_into()?, Ordering::Release);
                 }
             }
 
@@ -199,13 +233,16 @@ where
                 match_index,
             },
             term: current_term,
-            
+
             peer: packet.peer.clone(),
         };
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn run(self, handoff_packet: Option<Packet<V>>) -> StateResult<Server<Candidate, C, V>, V> {
+    async fn run(
+        self,
+        handoff_packet: Option<Packet<V>>,
+    ) -> StateResult<Server<Candidate, C, V>, V> {
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
@@ -215,7 +252,8 @@ where
     }
 
     pub fn start(connection: C, config: crate::config::Config) -> ServerHandle<V> {
-        let timeout = Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
+        let timeout =
+            Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
         let (state_tx, state_rx) = watch::channel(());
         let join_h = tokio::spawn(async move {
@@ -249,7 +287,10 @@ where
     V: JournalValue,
 {
     fn from(candidate: Server<Candidate, C, V>) -> Self {
-        let timeout = Self::generate_random_timeout(candidate.config.election_timeout_min, candidate.config.election_timeout_max);
+        let timeout = Self::generate_random_timeout(
+            candidate.config.election_timeout_min,
+            candidate.config.election_timeout_max,
+        );
         Self {
             connection: candidate.connection,
             requests: candidate.requests,
@@ -268,7 +309,10 @@ where
     V: JournalValue,
 {
     fn from(leader: Server<Leader, C, V>) -> Self {
-        let timeout = Self::generate_random_timeout(leader.config.election_timeout_min, leader.config.election_timeout_max);
+        let timeout = Self::generate_random_timeout(
+            leader.config.election_timeout_min,
+            leader.config.election_timeout_max,
+        );
         Self {
             connection: leader.connection,
             requests: leader.requests,

@@ -1,10 +1,10 @@
 pub mod udp;
 
-use std::{net::SocketAddr, error::Error};
+use std::{error::Error, net::SocketAddr};
 
 use async_trait::async_trait;
 use derive_more::{From, FromStr};
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::journal::{JournalEntry, JournalValue};
 #[derive(Serialize, Deserialize, Debug)]

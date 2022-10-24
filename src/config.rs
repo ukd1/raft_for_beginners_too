@@ -1,4 +1,4 @@
-use std::{time::Duration, num::ParseIntError};
+use std::{num::ParseIntError, time::Duration};
 
 use clap::Parser;
 
@@ -29,8 +29,7 @@ pub struct Config {
     // restarts its randomized election timeout at the start of an
     // election, and it waits for that timeout to elapse before
     // starting the next election; this reduces the likelihood of
-    // another split vote in the new election. 
-
+    // another split vote in the new election.
     /// Election min timeout in ms
     #[clap(long, parse(try_from_str = parse_millis), default_value = "150")]
     pub election_timeout_min: Duration,

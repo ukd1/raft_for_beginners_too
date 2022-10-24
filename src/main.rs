@@ -1,22 +1,17 @@
 mod config;
 mod connection;
-mod raft;
 mod journal;
+mod raft;
 
 use clap::Parser;
 
 use crate::config::Config;
-use crate::connection::{Connection, udp::UdpConnection};
+use crate::connection::{udp::UdpConnection, Connection};
 use crate::raft::{Result, Server, ServerError};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    use tracing_subscriber::{
-        EnvFilter,
-        prelude::*,
-        filter::LevelFilter,
-        fmt,
-    };
+    use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
     let env_filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
@@ -52,9 +47,9 @@ async fn main() -> Result<()> {
                     Err(ServerError::NotLeader) => {
                         this.state_change().await;
                         continue;
-                    },
+                    }
                     Err(e) => Err(e)?,
-                    Ok(_) => {},
+                    Ok(_) => {}
                 }
                 tracing::info!(%i, "test request added to journal");
                 i += 1;

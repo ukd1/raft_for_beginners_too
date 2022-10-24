@@ -1,11 +1,25 @@
-use std::{sync::{atomic::Ordering, Arc, Mutex, RwLock}, collections::{HashMap, BTreeMap, VecDeque}, fmt::Display};
+use std::{
+    collections::{BTreeMap, HashMap, VecDeque},
+    fmt::Display,
+    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+};
 
-use tokio::{time::{timeout, Instant}, sync::oneshot};
+use tokio::{
+    sync::oneshot,
+    time::{timeout, Instant},
+};
 use tracing::{debug, trace, warn};
 
-use crate::{connection::{PacketType, Packet, Connection, ServerAddress}, raft::HandlePacketAction, journal::JournalValue};
+use crate::{
+    connection::{Connection, Packet, PacketType, ServerAddress},
+    journal::JournalValue,
+    raft::HandlePacketAction,
+};
 
-use super::{Result, Server, state::{ServerState, Follower, Candidate}, StateResult, ServerError};
+use super::{
+    state::{Candidate, Follower, ServerState},
+    Result, Server, ServerError, StateResult,
+};
 
 #[derive(Debug)]
 pub struct Leader {
@@ -42,9 +56,7 @@ impl PeerIndices {
     }
 
     pub fn get(&self, peer: &ServerAddress) -> Option<u64> {
-        self.read().get(peer)
-            .copied()
-            .flatten()
+        self.read().get(peer).copied().flatten()
     }
 
     pub fn set(&self, peer: &ServerAddress, index: Option<u64>) {
@@ -53,7 +65,8 @@ impl PeerIndices {
 
     pub fn decrement(&self, peer: &ServerAddress) {
         let mut map = self.write();
-        let new_index = map.get(peer)
+        let new_index = map
+            .get(peer)
             .copied()
             .flatten()
             .and_then(|i| i.checked_sub(1));
@@ -62,15 +75,16 @@ impl PeerIndices {
 
     /// Get the highest index for which a quorum of nodes
     /// exists
-    /// 
+    ///
     /// Parameters:
     /// quorum - the number of nodes required to establish a majority
     pub fn greatest_quorum_index(&self, quorum: usize) -> u64 {
         let map = self.read();
-        
+
         let mut index_counts: BTreeMap<u64, usize> = BTreeMap::new();
         for index in map.iter().filter_map(|(_, opt_i)| opt_i.as_ref()) {
-            let count = index_counts.entry(*index)
+            let count = index_counts
+                .entry(*index)
                 .and_modify(|cnt| *cnt += 1)
                 .or_insert(1);
 
@@ -78,7 +92,7 @@ impl PeerIndices {
             // has quorum
             if *count >= quorum {
                 return *index;
-            } 
+            }
         }
 
         // In highest to lowest index order (rev), sum the count
@@ -114,7 +128,9 @@ where
         match packet.message_type {
             AppendEntriesAck { .. } => self.handle_appendentriesack(&packet).await,
             // Leaders ignore these packets
-            AppendEntries { .. } | VoteRequest { .. } | VoteResponse { .. } => Ok(HandlePacketAction::MaintainState(None)),
+            AppendEntries { .. } | VoteRequest { .. } | VoteResponse { .. } => {
+                Ok(HandlePacketAction::MaintainState(None))
+            }
         }
     }
 
@@ -128,17 +144,16 @@ where
         self.state.match_index.set(&leader_addr, Some(index));
         let (response_tx, response_rx) = oneshot::channel();
         {
-            let mut requests = self.state.requests.lock()
-                .expect("requests lock poisoned");
-            requests
-                .push_back((index, response_tx));
+            let mut requests = self.state.requests.lock().expect("requests lock poisoned");
+            requests.push_back((index, response_tx));
             trace!(%index, "added client response sender to requests queue");
         }
 
         // TODO: apply entry to state machine and return result
         //       remove clippy allow when implemented
         #[allow(clippy::let_unit_value)]
-        let result = timeout(self.config.request_timeout, response_rx).await?
+        let result = timeout(self.config.request_timeout, response_rx)
+            .await?
             .map_err(|_| ServerError::RequestFailed)?;
         Ok(result)
     }
@@ -149,15 +164,21 @@ where
         match packet.message_type {
             PacketType::AppendEntriesAck { did_append, .. } if !did_append => {
                 self.state.next_index.decrement(&packet.peer);
-            },
-            PacketType::AppendEntriesAck { did_append, match_index: Some(match_index) } if did_append => {
-                self.state.next_index.set(&packet.peer, Some(match_index + 1));
+            }
+            PacketType::AppendEntriesAck {
+                did_append,
+                match_index: Some(match_index),
+            } if did_append => {
+                self.state
+                    .next_index
+                    .set(&packet.peer, Some(match_index + 1));
                 self.state.match_index.set(&packet.peer, Some(match_index));
                 let commit_index = self.journal.commit_index();
                 // Using the following match_index == commit_index == 0 logic
                 // instead of using an Option<u64> for the commit_index, because
                 // it allows us to use atomics inside journal instead of locking
-                if match_index > commit_index || (commit_index == 0 && match_index == commit_index) {
+                if match_index > commit_index || (commit_index == 0 && match_index == commit_index)
+                {
                     let quorum = self.quorum();
                     let quorum_index = self.state.match_index.greatest_quorum_index(quorum);
                     let current_term = self.term.load(Ordering::Acquire);
@@ -168,8 +189,8 @@ where
                         debug!(commit_index = %match_index, "updated commit index");
 
                         {
-                            let mut requests = self.state.requests.lock()
-                                .expect("requests lock poisoned");
+                            let mut requests =
+                                self.state.requests.lock().expect("requests lock poisoned");
                             loop {
                                 match requests.pop_front() {
                                     Some((index, response_tx)) if index <= match_index => {
@@ -178,30 +199,34 @@ where
                                         if result.is_err() {
                                             warn!(%index, "client request dropped");
                                         }
-                                    },
+                                    }
                                     Some(r) => {
                                         requests.push_front(r);
                                         break;
-                                    },
+                                    }
                                     None => break,
                                 };
                             }
                         }
-                            
                     }
                 }
-            },
-            PacketType::AppendEntriesAck { match_index: None, .. } => {
+            }
+            PacketType::AppendEntriesAck {
+                match_index: None, ..
+            } => {
                 self.state.next_index.set(&packet.peer, Some(0));
                 self.state.match_index.set(&packet.peer, None);
-            },
+            }
             _ => unreachable!("handle_appendentriesack called with non-AppendEntriesAck packet"),
         }
 
         Ok(HandlePacketAction::MaintainState(None))
     }
 
-    pub(super) async fn run(self, next_packet: Option<Packet<V>>) -> StateResult<Server<Follower, C, V>, V> {
+    pub(super) async fn run(
+        self,
+        next_packet: Option<Packet<V>>,
+    ) -> StateResult<Server<Follower, C, V>, V> {
         let this = Arc::new(self);
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
@@ -215,7 +240,7 @@ where
         match heartbeat_handle.await {
             Err(join_err) if !join_err.is_cancelled() => Err(join_err)?,
             Ok(Err(heartbeat_err)) => Err(heartbeat_err)?,
-            _ => {}, // Either exited normally or was cancelled
+            _ => {} // Either exited normally or was cancelled
         }
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         Ok((this.into(), packet_for_next_state))
@@ -239,7 +264,8 @@ where
             for peer in &self.config.peers {
                 let peer_next_index = self.state.next_index.get(peer);
                 // let peer_update = self.journal.get_update(peer_next_index);
-                let peer_update = update_cache.entry(peer_next_index)
+                let peer_update = update_cache
+                    .entry(peer_next_index)
                     .or_insert_with(|| self.journal.get_update(peer_next_index));
                 let heartbeat = PacketType::AppendEntries {
                     prev_log_index: peer_update.prev_index,
@@ -264,12 +290,20 @@ where
     V: JournalValue,
 {
     fn from(candidate: Server<Candidate, C, V>) -> Self {
-
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
-        let next_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), Some(journal_next_index))).collect();
-        let match_index: PeerIndices = candidate.config.peers.iter().map(|p| (p.to_owned(), None)).collect();
-
+        let next_index: PeerIndices = candidate
+            .config
+            .peers
+            .iter()
+            .map(|p| (p.to_owned(), Some(journal_next_index)))
+            .collect();
+        let match_index: PeerIndices = candidate
+            .config
+            .peers
+            .iter()
+            .map(|p| (p.to_owned(), None))
+            .collect();
 
         Self {
             connection: candidate.connection,

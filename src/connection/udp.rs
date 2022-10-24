@@ -1,8 +1,8 @@
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
-use tracing::trace;
 use tokio::net::UdpSocket;
+use tracing::trace;
 
 use super::*;
 
@@ -48,6 +48,9 @@ impl<V: JournalValue> Connection<V> for UdpConnection<V> {
     }
 
     fn address(&self) -> ServerAddress {
-        self.socket.local_addr().expect("should always be bound").into()
+        self.socket
+            .local_addr()
+            .expect("should always be bound")
+            .into()
     }
 }

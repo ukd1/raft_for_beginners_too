@@ -1,8 +1,14 @@
-use std::{sync::{RwLock, atomic::{AtomicUsize, Ordering}}, fmt::{self, Debug, Display}};
+use std::{
+    fmt::{self, Debug, Display},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        RwLock,
+    },
+};
 
-use serde::{Serialize, Deserialize, de::DeserializeOwned};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::watch;
-use tracing::{warn, trace};
+use tracing::{trace, warn};
 
 impl<V: JournalValue> Journal<V> {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<V>>> {
@@ -21,16 +27,11 @@ impl<V: JournalValue> Journal<V> {
     }
 
     /// Append a command to the journal
-    /// 
+    ///
     /// Returns: index of the appended entry
     pub fn append(&self, term: u64, value: V) -> u64 {
         let mut entries = self.write();
-        entries.push(
-            crate::journal::JournalEntry {
-                term,
-                value,
-            }
-        );
+        entries.push(crate::journal::JournalEntry { term, value });
         let last_index = entries.len() - 1;
         last_index.try_into().expect("journal.len() overflowed u64")
     }
@@ -58,8 +59,10 @@ impl<V: JournalValue> Journal<V> {
     }
 
     pub fn commit_index(&self) -> u64 {
-        self.commit_index.load(Ordering::Acquire)
-            .try_into().expect("commit_index overflowed u64")
+        self.commit_index
+            .load(Ordering::Acquire)
+            .try_into()
+            .expect("commit_index overflowed u64")
     }
 
     pub fn set_commit_index(&self, index: u64) {
@@ -82,20 +85,28 @@ impl<V: JournalValue> Journal<V> {
                     warn!(index = %update_start_index, "update requested beyond journal end");
                 }
                 vec![]
-            },
+            }
         };
 
         // Adapted from TLA+ spec: https://github.com/ongardie/raft.tla/blob/974fff7236545912c035ff8041582864449d0ffe/raft.tla#L222
         let last_index = entries.len().saturating_sub(1);
         let commit_index = std::cmp::min(last_index, self.commit_index.load(Ordering::Acquire));
 
-        trace!(?index, ?prev_index, ?prev_term, ?update_entries, "generate journal update");
+        trace!(
+            ?index,
+            ?prev_index,
+            ?prev_term,
+            ?update_entries,
+            "generate journal update"
+        );
 
         JournalUpdate {
             prev_term: prev_term.unwrap_or(0),
             prev_index: prev_index.map(|i| i.try_into().expect("prev_index overflowed u64")),
             entries: update_entries,
-            commit_index: commit_index.try_into().expect("commit_index overflowed u64"),
+            commit_index: commit_index
+                .try_into()
+                .expect("commit_index overflowed u64"),
         }
     }
 
@@ -109,7 +120,6 @@ impl<V: JournalValue> Journal<V> {
     }
 }
 
-
 #[derive(Debug, Serialize)]
 pub struct Journal<V: JournalValue> {
     entries: RwLock<Vec<JournalEntry<V>>>,
@@ -120,8 +130,7 @@ pub struct Journal<V: JournalValue> {
 
 impl<V: JournalValue> Display for Journal<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let json_value = serde_json::to_value(self)
-            .map_err(|_| fmt::Error::default())?;
+        let json_value = serde_json::to_value(self).map_err(|_| fmt::Error::default())?;
         write!(f, "{:#}", json_value)
     }
 }
@@ -144,15 +153,18 @@ pub struct JournalEntry<V: JournalValue> {
     pub value: V,
 }
 
-pub trait JournalValue: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static {}
+pub trait JournalValue:
+    Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static
+{
+}
 
-impl<T> JournalValue for T
-where
+impl<T> JournalValue for T where
     T: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static
-{}
+{
+}
 
 pub struct JournalUpdate<V: JournalValue> {
-    pub prev_term: u64, // TODO make these a u32
+    pub prev_term: u64,          // TODO make these a u32
     pub prev_index: Option<u64>, // TODO make these a u32
     pub entries: Vec<JournalEntry<V>>,
     pub commit_index: u64, // TODO make these a u32
@@ -201,10 +213,3 @@ mod test {
     }
 }
 */
-
-
-
-
-
-
-

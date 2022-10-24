@@ -1,41 +1,43 @@
-mod follower;
 mod candidate;
+mod follower;
 mod leader;
 
 use std::any::Any;
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::{result::Result as StdResult, sync::Arc};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use pin_project::pin_project;
 use rand::Rng;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, watch};
-use tokio::sync::{oneshot, mpsc};
+use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{watch, Mutex};
 use tokio::task::JoinSet;
-use tokio::{task::JoinHandle, time::{Duration, Instant, sleep_until}};
-use tracing::{info, debug, warn, info_span, Instrument, error};
+use tokio::{
+    task::JoinHandle,
+    time::{sleep_until, Duration, Instant},
+};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
+use crate::connection::{Connection, ConnectionError, Packet};
 use crate::journal::{Journal, JournalValue};
-use crate::connection::{ConnectionError, Packet, Connection};
 
-use self::state::{ServerState, Follower, Candidate, Leader};
+use self::state::{Candidate, Follower, Leader, ServerState};
 
 pub type Result<T> = std::result::Result<T, ServerError>;
 type StateResult<T, V> = Result<(T, Option<Packet<V>>)>;
 type ClientRequest<V> = (V, oneshot::Sender<Result<()>>);
 
 mod state {
-    use std::{fmt::{Debug, Display}, any::Any};
+    use std::{
+        any::Any,
+        fmt::{Debug, Display},
+    };
 
     use tokio::time::Instant;
 
-    pub use super::{
-        follower::Follower,
-        candidate::Candidate,
-        leader::Leader,
-    };
+    pub use super::{candidate::Candidate, follower::Follower, leader::Leader};
 
     pub trait ServerState: Debug + Display + Any + Send + Sync {
         fn get_timeout(&self) -> Option<Instant>;
@@ -52,29 +54,40 @@ pub struct ServerHandle<V> {
 }
 
 impl<V> ServerHandle<V> {
-    fn new(inner: JoinHandle<Result<()>>, requests: mpsc::Sender<ClientRequest<V>>, state: watch::Receiver<()>) -> Self {
-        Self { inner: Some(inner), requests, state }
+    fn new(
+        inner: JoinHandle<Result<()>>,
+        requests: mpsc::Sender<ClientRequest<V>>,
+        state: watch::Receiver<()>,
+    ) -> Self {
+        Self {
+            inner: Some(inner),
+            requests,
+            state,
+        }
     }
 
     pub async fn send(&self, value: V) -> Result<()> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.requests.send((value, response_tx)).await
+        self.requests
+            .send((value, response_tx))
+            .await
             .or(Err(ServerError::RequestFailed))?;
-        response_rx.await
-            .or(Err(ServerError::RequestFailed))?
+        response_rx.await.or(Err(ServerError::RequestFailed))?
     }
 
     pub async fn state_change(&self) {
         let mut state = self.state.clone();
-        state.changed().await
-            .expect("state sender dropped")
+        state.changed().await.expect("state sender dropped")
     }
 }
 
 impl<V> Future for ServerHandle<V> {
     type Output = <JoinHandle<Result<()>> as Future>::Output;
 
-    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Self::Output> {
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
         match self.project().inner.as_pin_mut() {
             Some(f) => f.poll(cx),
             None => Poll::Ready(Ok(Err(ServerError::HandleCloned))),
@@ -189,10 +202,13 @@ where
     /// or timeout for followers not hearing from the leader
     async fn reset_term_timeout(&self) {
         // https://stackoverflow.com/questions/19671845/how-can-i-generate-a-random-number-within-a-range-in-rust
-        let new_timeout = Self::generate_random_timeout(self.config.election_timeout_min, self.config.election_timeout_max);
+        let new_timeout = Self::generate_random_timeout(
+            self.config.election_timeout_min,
+            self.config.election_timeout_max,
+        );
         self.state.set_timeout(new_timeout);
     }
-   
+
     async fn update_term(&self, packet: &Packet<V>) -> StdResult<u64, u64> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
@@ -300,7 +316,8 @@ where
         let startup_span = info_span!("startup", term = %current_term, state = %self.state);
         if current_term > 0 {
             startup_span.in_scope(|| warn!("state change"));
-            self.state_tx.send(())
+            self.state_tx
+                .send(())
                 .expect("state change notification failed");
         }
 
@@ -312,8 +329,14 @@ where
             // were not, then a check for first_packet would have to
             // be run in every loop iteration, every time a packet
             // is received--an unnecessary performance penalty.
-            let action = self.handle_packet_downcast(packet).instrument(startup_span).await?;
-            assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
+            let action = self
+                .handle_packet_downcast(packet)
+                .instrument(startup_span)
+                .await?;
+            assert!(
+                !matches!(action, MaintainState(Some(_))),
+                "reply packet should have been taken and sent"
+            );
             if let ChangeState(maybe_packet) = action {
                 main_tasks.shutdown().await;
                 return Ok(maybe_packet);
@@ -353,7 +376,10 @@ where
                 },
                 _ = timeout => self.handle_timeout_downcast().await?,
             };
-            assert!(!matches!(action, MaintainState(Some(_))), "reply packet should have been taken and sent");
+            assert!(
+                !matches!(action, MaintainState(Some(_))),
+                "reply packet should have been taken and sent"
+            );
             if let ChangeState(maybe_packet) = action {
                 main_tasks.shutdown().await;
                 return Ok(maybe_packet);
