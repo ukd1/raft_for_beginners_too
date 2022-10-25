@@ -3,14 +3,16 @@ mod connection;
 mod journal;
 mod raft;
 
+use std::error::Error;
+
 use clap::Parser;
 
 use crate::config::Config;
 use crate::connection::{udp::UdpConnection, Connection};
-use crate::raft::{Result, Server, ServerError};
+use crate::raft::{Server, ServerError};
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
     let env_filter = EnvFilter::builder()
@@ -39,30 +41,40 @@ async fn main() -> Result<()> {
     let test_request_handle = {
         let this = server_handle.clone();
         tokio::spawn(async move {
-            let mut i = 1;
+            let mut i = 0;
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 ticker.tick().await;
                 match this.send(i.to_string()).await {
-                    Err(ServerError::NotLeader) => {
+                    // On a real client, the following two errors should result
+                    // in retrying requests to the leader address, but because
+                    // we are running a simulated client inside of each node,
+                    // we just pause until the state changes.
+                    Err(ServerError::Unavailable(_)) => {
+                        this.state_change().await;
+                        continue;
+                    },
+                    Err(ServerError::NotLeader(l)) => {
+                        tracing::error!(leader = ?l, "request sent to follower, OOPS");
                         this.state_change().await;
                         continue;
                     }
-                    Err(e) => Err(e)?,
-                    Ok(_) => {}
+                    Err(e) => tracing::error!(error = %e, "request error"),
+                    Ok(_) => {},
                 }
                 tracing::info!(%i, "test request added to journal");
                 i += 1;
             }
             #[allow(unreachable_code)]
-            Ok::<_, ServerError>(())
+            Ok::<_, ServerError<_>>(())
         })
     };
     //
     // END DEBUG
     //
-    tokio::select! {
+    let server_result = tokio::select! {
         res = server_handle => res?,
         res = test_request_handle => res?,
-    }
+    }?;
+    Ok(server_result)
 }

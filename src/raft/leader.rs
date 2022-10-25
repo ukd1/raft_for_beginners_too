@@ -5,7 +5,6 @@ use std::{
 };
 
 use tokio::{
-    sync::oneshot,
     time::{timeout, Instant},
 };
 use tracing::{debug, trace, warn};
@@ -18,17 +17,17 @@ use crate::{
 
 use super::{
     state::{Candidate, Follower, ServerState},
-    Result, Server, ServerError, StateResult,
+    Result, Server, ClientResultSender, StateResult
 };
 
 #[derive(Debug)]
-pub struct Leader {
+pub struct Leader<V: JournalValue> {
     pub next_index: PeerIndices,
     pub match_index: PeerIndices,
-    pub requests: Mutex<VecDeque<(u64, oneshot::Sender<()>)>>,
+    pub requests: Mutex<VecDeque<(u64, ClientResultSender<V>)>>,
 }
 
-impl ServerState for Leader {
+impl<V: JournalValue> ServerState for Leader<V> {
     fn get_timeout(&self) -> Option<Instant> {
         None
     }
@@ -37,7 +36,7 @@ impl ServerState for Leader {
     }
 }
 
-impl Display for Leader {
+impl<V: JournalValue> Display for Leader<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Leader")
     }
@@ -117,12 +116,12 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
     }
 }
 
-impl<C, V> Server<Leader, C, V>
+impl<C, V> Server<Leader<V>, C, V>
 where
     C: Connection<V>,
     V: JournalValue,
 {
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -134,7 +133,7 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
+    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V>) {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
@@ -142,23 +141,14 @@ where
         let leader_addr = self.connection.address();
         self.state.next_index.set(&leader_addr, Some(index + 1));
         self.state.match_index.set(&leader_addr, Some(index));
-        let (response_tx, response_rx) = oneshot::channel();
         {
             let mut requests = self.state.requests.lock().expect("requests lock poisoned");
-            requests.push_back((index, response_tx));
+            requests.push_back((index, result_tx));
             trace!(%index, "added client response sender to requests queue");
         }
-
-        // TODO: apply entry to state machine and return result
-        //       remove clippy allow when implemented
-        #[allow(clippy::let_unit_value)]
-        let result = timeout(self.config.request_timeout, response_rx)
-            .await?
-            .map_err(|_| ServerError::RequestFailed)?;
-        Ok(result)
     }
 
-    async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
+    async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
         // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
@@ -193,9 +183,9 @@ where
                                 self.state.requests.lock().expect("requests lock poisoned");
                             loop {
                                 match requests.pop_front() {
-                                    Some((index, response_tx)) if index <= match_index => {
+                                    Some((index, result_tx)) if index <= match_index => {
                                         trace!(%index, "found response sender for committed value");
-                                        let result = response_tx.send(());
+                                        let result = result_tx.send(Ok(()));
                                         if result.is_err() {
                                             warn!(%index, "client request dropped");
                                         }
@@ -246,7 +236,7 @@ where
         Ok((this.into(), packet_for_next_state))
     }
 
-    async fn heartbeat_loop(self: Arc<Self>) -> Result<()> {
+    async fn heartbeat_loop(self: Arc<Self>) -> Result<(), V> {
         let heartbeat_interval = self.config.heartbeat_interval;
         let mut journal_changes = self.journal.subscribe();
 
@@ -284,7 +274,7 @@ where
     }
 }
 
-impl<C, V> From<Server<Candidate, C, V>> for Server<Leader, C, V>
+impl<C, V> From<Server<Candidate, C, V>> for Server<Leader<V>, C, V>
 where
     C: Connection<V>,
     V: JournalValue,

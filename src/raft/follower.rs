@@ -25,6 +25,7 @@ use super::{
 pub struct Follower {
     pub timeout: RwLock<Instant>,
     pub voted_for: Mutex<Ballot>,
+    pub leader: Mutex<Option<ServerAddress>>,
 }
 
 impl ServerState for Follower {
@@ -47,6 +48,7 @@ impl Follower {
         Self {
             timeout: RwLock::new(timeout),
             voted_for: Default::default(),
+            leader: Default::default(),
         }
     }
 }
@@ -75,13 +77,13 @@ where
     C: Connection<V>,
     V: JournalValue,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
         warn!("Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -94,7 +96,7 @@ where
         }
     }
 
-    async fn handle_voterequest(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
+    async fn handle_voterequest(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
         let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
             PacketType::VoteRequest {
@@ -154,7 +156,7 @@ where
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn handle_appendentries(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
+    async fn handle_appendentries(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
 
         let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
@@ -256,6 +258,7 @@ where
             Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
         let (state_tx, state_rx) = watch::channel(());
+        let handle_timeout = config.request_timeout;
         let join_h = tokio::spawn(async move {
             let mut follower = Self {
                 connection,
@@ -277,7 +280,7 @@ where
                 };
             }
         });
-        ServerHandle::new(join_h, requests_tx, state_rx)
+        ServerHandle::new(join_h, requests_tx, state_rx, handle_timeout)
     }
 }
 
@@ -303,12 +306,12 @@ where
     }
 }
 
-impl<C, V> From<Server<Leader, C, V>> for Server<Follower, C, V>
+impl<C, V> From<Server<Leader<V>, C, V>> for Server<Follower, C, V>
 where
     C: Connection<V>,
     V: JournalValue,
 {
-    fn from(leader: Server<Leader, C, V>) -> Self {
+    fn from(leader: Server<Leader<V>, C, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             leader.config.election_timeout_min,
             leader.config.election_timeout_max,

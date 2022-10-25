@@ -77,7 +77,7 @@ where
     V: JournalValue,
 {
     Follower(Server<Follower, C, V>),
-    Leader(Server<Leader, C, V>),
+    Leader(Server<Leader<V>, C, V>),
 }
 
 impl<C, V> Server<Candidate, C, V>
@@ -85,14 +85,14 @@ where
     C: Connection<V>,
     V: JournalValue,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
         Ok(HandlePacketAction::MaintainState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
+    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -109,7 +109,7 @@ where
         }
     }
 
-    async fn handle_voteresponse(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>> {
+    async fn handle_voteresponse(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term != current_term {
             warn!(?packet.peer, ?packet.term, "got a vote response for the wrong term");
@@ -151,7 +151,7 @@ where
         vote_cnt >= quorum
     }
 
-    async fn start_election(&self) -> Result<()> {
+    async fn start_election(&self) -> Result<(), V> {
         let current_term = self.term.fetch_add(1, Ordering::Release) + 1;
         // There is a bug in tracing_subscriber that causes the
         // term field to be logged twice when an election timeout

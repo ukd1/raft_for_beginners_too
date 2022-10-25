@@ -14,21 +14,22 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
 use tokio::sync::{watch, Mutex};
 use tokio::task::JoinSet;
+use tokio::time::timeout;
 use tokio::{
     task::JoinHandle,
     time::{sleep_until, Duration, Instant},
 };
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
-use crate::connection::{Connection, ConnectionError, Packet};
+use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
 use crate::journal::{Journal, JournalValue};
 
 use self::state::{Candidate, Follower, Leader, ServerState};
 
-pub type Result<T> = std::result::Result<T, ServerError>;
-type StateResult<T, V> = Result<(T, Option<Packet<V>>)>;
-type ClientRequest<V> = (V, oneshot::Sender<Result<()>>);
-
+pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
+type StateResult<T, V> = Result<(T, Option<Packet<V>>), V>;
+type ClientResultSender<V> = oneshot::Sender<Result<ClientResponse, V>>;
+type ClientRequest<V> = (V, ClientResultSender<V>);
 mod state {
     use std::{
         any::Any,
@@ -46,33 +47,37 @@ mod state {
 }
 
 #[pin_project]
-pub struct ServerHandle<V> {
+pub struct ServerHandle<V: JournalValue> {
     #[pin]
-    inner: Option<JoinHandle<Result<()>>>,
+    inner: Option<JoinHandle<Result<(), V>>>,
     requests: mpsc::Sender<ClientRequest<V>>,
     state: watch::Receiver<()>, // TODO: enum for state
+    timeout: Duration,
 }
 
-impl<V> ServerHandle<V> {
+impl<V: JournalValue> ServerHandle<V> {
     fn new(
-        inner: JoinHandle<Result<()>>,
+        inner: JoinHandle<Result<(), V>>,
         requests: mpsc::Sender<ClientRequest<V>>,
         state: watch::Receiver<()>,
+        timeout: Duration,
     ) -> Self {
         Self {
             inner: Some(inner),
             requests,
             state,
+            timeout,
         }
     }
 
-    pub async fn send(&self, value: V) -> Result<()> {
-        let (response_tx, response_rx) = oneshot::channel();
+    pub async fn send(&self, value: V) -> Result<ClientResponse, V> {
+        let (result_tx, result_rx) = oneshot::channel();
         self.requests
-            .send((value, response_tx))
+            .send((value, result_tx))
             .await
             .or(Err(ServerError::RequestFailed))?;
-        response_rx.await.or(Err(ServerError::RequestFailed))?
+        timeout(self.timeout, result_rx).await?
+            .or(Err(ServerError::RequestFailed))?
     }
 
     pub async fn state_change(&self) {
@@ -81,8 +86,8 @@ impl<V> ServerHandle<V> {
     }
 }
 
-impl<V> Future for ServerHandle<V> {
-    type Output = <JoinHandle<Result<()>> as Future>::Output;
+impl<V: JournalValue> Future for ServerHandle<V> {
+    type Output = <JoinHandle<Result<(), V>> as Future>::Output;
 
     fn poll(
         self: std::pin::Pin<&mut Self>,
@@ -95,18 +100,19 @@ impl<V> Future for ServerHandle<V> {
     }
 }
 
-impl<V> Clone for ServerHandle<V> {
+impl<V: JournalValue> Clone for ServerHandle<V> {
     fn clone(&self) -> Self {
         Self {
             inner: None,
             requests: self.requests.clone(),
             state: self.state.clone(),
+            timeout: self.timeout.clone(),
         }
     }
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ServerError {
+pub enum ServerError<V: JournalValue> {
     #[error(transparent)]
     ConnectionFailed(#[from] ConnectionError),
     #[error(transparent)]
@@ -117,8 +123,10 @@ pub enum ServerError {
     RequestFailed,
     #[error("client request timed out")]
     RequestTimeout(#[from] tokio::time::error::Elapsed),
-    #[error("not cluster leader, can't accept requests")] // TODO: forward/redirect
-    NotLeader,
+    #[error("not cluster leader, can't accept requests")]
+    NotLeader(ServerAddress),
+    #[error("election in progress; try request again")]
+    Unavailable(V),
     #[error("ServerHandle cloned: can only await first handle")]
     HandleCloned,
 }
@@ -146,7 +154,7 @@ where
 {
     Follower(&'s Server<Follower, C, V>),
     Candidate(&'s Server<Candidate, C, V>),
-    Leader(&'s Server<Leader, C, V>),
+    Leader(&'s Server<Leader<V>, C, V>),
 }
 
 pub(crate) enum HandlePacketAction<V: JournalValue> {
@@ -154,12 +162,14 @@ pub(crate) enum HandlePacketAction<V: JournalValue> {
     ChangeState(Option<Packet<V>>),
 }
 
+type ClientResponse = (); // TODO: something real
+
 impl<C, V> ServerImpl<'_, C, V>
 where
     C: Connection<V>,
     V: JournalValue,
 {
-    pub async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
+    pub async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
             ServerImpl::Candidate(c) => c.handle_packet(packet).await,
@@ -167,7 +177,7 @@ where
         }
     }
 
-    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<V>> {
+    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
         match self {
             ServerImpl::Follower(f) => f.handle_timeout().await,
             ServerImpl::Candidate(c) => c.handle_timeout().await,
@@ -175,11 +185,26 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: V) -> Result<()> {
+    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V>) {
+        let send_result = match self {
+            ServerImpl::Follower(f) => result_tx.send(Err(
+                match &*f.state.leader.lock().expect("leader lock poisoned") {
+                    Some(l) => ServerError::NotLeader(l.clone()),
+                    None => ServerError::Unavailable(value),
+                }
+            )),
+            ServerImpl::Candidate(_) => result_tx.send(Err(ServerError::Unavailable(value))),
+            ServerImpl::Leader(l) => Ok(l.handle_clientrequest(value, result_tx).await),
+        };
+        if let Err(Err(e)) = send_result {
+            error!(error = %e, "could not send client error");
+        }
+    }
+
+    pub async fn update_leader(&self, leader: &ServerAddress) {
         match self {
-            ServerImpl::Follower(_) => Err(ServerError::NotLeader), // TODO: request forwarding or redirecting
-            ServerImpl::Candidate(_) => Err(ServerError::NotLeader), // TODO: request forwarding or redirecting
-            ServerImpl::Leader(l) => l.handle_clientrequest(value).await,
+            ServerImpl::Follower(f) => *f.state.leader.lock().expect("leader lock poisoned") = Some(leader.clone()),
+            _ => unimplemented!("Leader and Candidate do not track current leader"),
         }
     }
 }
@@ -239,7 +264,7 @@ where
             ServerImpl::Follower(follower)
         } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, V>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader, C, V>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, V>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);
@@ -254,8 +279,8 @@ where
         ),
     )]
 
-    async fn handle_request_downcast(&self, value: V) -> Result<()> {
-        self.downcast().handle_clientrequest(value).await
+    async fn handle_request_downcast(&self, value: V, result_tx: ClientResultSender<V>) {
+        self.downcast().handle_clientrequest(value, result_tx).await;
     }
 
     #[tracing::instrument(
@@ -266,13 +291,16 @@ where
             state = %self.state,
         ),
     )]
-    async fn handle_packet_downcast(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>> {
+    async fn handle_packet_downcast(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
         use HandlePacketAction::*;
 
         if self.update_term(&packet).await.is_err() {
             // Term from packet was greater than our term,
             // transition to Follower
-            if !self.in_state::<Follower>() {
+            if self.in_state::<Follower>() {
+                // Update the Follower's leader value
+                self.downcast().update_leader(&packet.peer).await;
+            } else {
                 // A new term should trigger a state transition for Leaders
                 // and Candidates, but a Follower should remain a Follower
                 // in the new term
@@ -297,7 +325,7 @@ where
             state = %self.state,
         ),
     )]
-    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<V>> {
+    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<V>, V> {
         use HandlePacketAction::*;
 
         let mut action = self.downcast().handle_timeout().await?;
@@ -309,7 +337,7 @@ where
         Ok(action)
     }
 
-    async fn main(self: Arc<Self>, first_packet: Option<Packet<V>>) -> Result<Option<Packet<V>>> {
+    async fn main(self: Arc<Self>, first_packet: Option<Packet<V>>) -> Result<Option<Packet<V>>, V> {
         use HandlePacketAction::*;
 
         let current_term = self.term.load(Ordering::Relaxed);
@@ -357,21 +385,8 @@ where
 
             let action = tokio::select! {
                 result = self.connection.receive() => self.handle_packet_downcast(result?).await?,
-                Some((request, response_h)) = client_requests.recv() => {
-                    let this = Arc::downgrade(&self);
-                    tokio::spawn(async move {
-                        match this.upgrade() {
-                            Some(this) => {
-                                let response = this.handle_request_downcast(request).await
-                                    .map(|_| ());
-                                let result = response_h.send(response);
-                                if result.is_err() {
-                                    error!("sending client response failed");
-                                }
-                            },
-                            None => warn!("server exited or changed state before client request completed"),
-                        }
-                    });
+                Some((request, result_tx)) = client_requests.recv() => {
+                    self.handle_request_downcast(request, result_tx).await;
                     HandlePacketAction::MaintainState(None)
                 },
                 _ = timeout => self.handle_timeout_downcast().await?,
@@ -394,7 +409,7 @@ where
             state = %self.state,
         ),
     )]
-    async fn signal_handler(self: Arc<Self>) -> Result<()> {
+    async fn signal_handler(self: Arc<Self>) -> Result<(), V> {
         use tokio::signal::unix::{signal, SignalKind};
 
         let mut usr1_stream = signal(SignalKind::user_defined1()).expect("signal handling failed");
