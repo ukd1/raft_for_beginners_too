@@ -30,7 +30,7 @@ pub enum PacketType<V: JournalValue> {
         prev_log_term: u64,
         #[serde(bound = "V: DeserializeOwned")]
         entries: Vec<JournalEntry<V>>,
-        leader_commit: u64,
+        leader_commit: Option<u64>,
     },
     AppendEntriesAck {
         did_append: bool,

@@ -4,9 +4,7 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
 };
 
-use tokio::{
-    time::{timeout, Instant},
-};
+use tokio::time::{timeout, Instant};
 use tracing::{debug, trace, warn};
 
 use crate::{
@@ -17,7 +15,7 @@ use crate::{
 
 use super::{
     state::{Candidate, Follower, ServerState},
-    Result, Server, ClientResultSender, StateResult
+    ClientResultSender, Result, Server, StateResult,
 };
 
 #[derive(Debug)]
@@ -121,7 +119,10 @@ where
     C: Connection<V>,
     V: JournalValue,
 {
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    pub(super) async fn handle_packet(
+        &self,
+        packet: Packet<V>,
+    ) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -148,7 +149,10 @@ where
         }
     }
 
-    async fn handle_appendentriesack(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_appendentriesack(
+        &self,
+        packet: &Packet<V>,
+    ) -> Result<HandlePacketAction<V>, V> {
         // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
@@ -157,18 +161,17 @@ where
             }
             PacketType::AppendEntriesAck {
                 did_append,
-                match_index: Some(match_index),
+                match_index,
             } if did_append => {
-                self.state
-                    .next_index
-                    .set(&packet.peer, Some(match_index + 1));
-                self.state.match_index.set(&packet.peer, Some(match_index));
+                let next_index = match_index.map_or(0, |i| i + 1);
+                self.state.next_index.set(&packet.peer, Some(next_index));
+                self.state.match_index.set(&packet.peer, match_index);
                 let commit_index = self.journal.commit_index();
                 // Using the following match_index == commit_index == 0 logic
                 // instead of using an Option<u64> for the commit_index, because
                 // it allows us to use atomics inside journal instead of locking
-                if match_index > commit_index || (commit_index == 0 && match_index == commit_index)
-                {
+                if match_index > commit_index {
+                    let match_index = match_index.unwrap();
                     let quorum = self.quorum();
                     let quorum_index = self.state.match_index.greatest_quorum_index(quorum);
                     let current_term = self.term.load(Ordering::Acquire);

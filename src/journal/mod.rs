@@ -1,7 +1,7 @@
 use std::{
     fmt::{self, Debug, Display},
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         RwLock,
     },
 };
@@ -58,16 +58,22 @@ impl<V: JournalValue> Journal<V> {
         Some(last_index)
     }
 
-    pub fn commit_index(&self) -> u64 {
-        self.commit_index
-            .load(Ordering::Acquire)
-            .try_into()
-            .expect("commit_index overflowed u64")
+    pub fn commit_index(&self) -> Option<u64> {
+        let has_entries = self.has_commits.load(Ordering::Acquire);
+        has_entries.then(|| {
+            self.commit_index
+                .load(Ordering::Acquire)
+                .try_into()
+                .expect("commit_index overflowed u64")
+        })
     }
 
     pub fn set_commit_index(&self, index: u64) {
         let index: usize = index.try_into().expect("index overflowed usize");
-        self.commit_index.store(index, Ordering::Release);
+        let prev_commit = self.commit_index.swap(index, Ordering::Release);
+        if prev_commit == 0 {
+            self.has_commits.store(true, Ordering::Release);
+        }
     }
 
     pub fn get_update(&self, index: Option<u64>) -> JournalUpdate<V> {
@@ -89,8 +95,10 @@ impl<V: JournalValue> Journal<V> {
         };
 
         // Adapted from TLA+ spec: https://github.com/ongardie/raft.tla/blob/974fff7236545912c035ff8041582864449d0ffe/raft.tla#L222
-        let last_index = entries.len().saturating_sub(1);
-        let commit_index = std::cmp::min(last_index, self.commit_index.load(Ordering::Acquire));
+        let last_index = <u64>::try_from(entries.len())
+            .expect("journal length overflowed")
+            .checked_sub(1);
+        let commit_index = std::cmp::min(last_index, self.commit_index());
 
         trace!(
             ?index,
@@ -104,9 +112,7 @@ impl<V: JournalValue> Journal<V> {
             prev_term: prev_term.unwrap_or(0),
             prev_index: prev_index.map(|i| i.try_into().expect("prev_index overflowed u64")),
             entries: update_entries,
-            commit_index: commit_index
-                .try_into()
-                .expect("commit_index overflowed u64"),
+            commit_index,
         }
     }
 
@@ -123,7 +129,8 @@ impl<V: JournalValue> Journal<V> {
 #[derive(Debug, Serialize)]
 pub struct Journal<V: JournalValue> {
     entries: RwLock<Vec<JournalEntry<V>>>,
-    pub commit_index: AtomicUsize,
+    commit_index: AtomicUsize,
+    has_commits: AtomicBool,
     #[serde(skip)]
     change_sender: watch::Sender<()>,
 }
@@ -140,7 +147,8 @@ impl<V: JournalValue> Default for Journal<V> {
         let (sender, _) = watch::channel(());
         Self {
             entries: RwLock::new(Vec::new()),
-            commit_index: AtomicUsize::new(0),
+            commit_index: 0.into(),
+            has_commits: false.into(),
             change_sender: sender,
         }
     }
@@ -167,7 +175,7 @@ pub struct JournalUpdate<V: JournalValue> {
     pub prev_term: u64,          // TODO make these a u32
     pub prev_index: Option<u64>, // TODO make these a u32
     pub entries: Vec<JournalEntry<V>>,
-    pub commit_index: u64, // TODO make these a u32
+    pub commit_index: Option<u64>, // TODO make these a u32
 }
 
 /* TODO: re-enable after Journal<V> refactor

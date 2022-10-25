@@ -76,7 +76,8 @@ impl<V: JournalValue> ServerHandle<V> {
             .send((value, result_tx))
             .await
             .or(Err(ServerError::RequestFailed))?;
-        timeout(self.timeout, result_rx).await?
+        timeout(self.timeout, result_rx)
+            .await?
             .or(Err(ServerError::RequestFailed))?
     }
 
@@ -191,7 +192,7 @@ where
                 match &*f.state.leader.lock().expect("leader lock poisoned") {
                     Some(l) => ServerError::NotLeader(l.clone()),
                     None => ServerError::Unavailable(value),
-                }
+                },
             )),
             ServerImpl::Candidate(_) => result_tx.send(Err(ServerError::Unavailable(value))),
             ServerImpl::Leader(l) => Ok(l.handle_clientrequest(value, result_tx).await),
@@ -203,7 +204,9 @@ where
 
     pub async fn update_leader(&self, leader: &ServerAddress) {
         match self {
-            ServerImpl::Follower(f) => *f.state.leader.lock().expect("leader lock poisoned") = Some(leader.clone()),
+            ServerImpl::Follower(f) => {
+                *f.state.leader.lock().expect("leader lock poisoned") = Some(leader.clone())
+            }
             _ => unimplemented!("Leader and Candidate do not track current leader"),
         }
     }
@@ -337,7 +340,10 @@ where
         Ok(action)
     }
 
-    async fn main(self: Arc<Self>, first_packet: Option<Packet<V>>) -> Result<Option<Packet<V>>, V> {
+    async fn main(
+        self: Arc<Self>,
+        first_packet: Option<Packet<V>>,
+    ) -> Result<Option<Packet<V>>, V> {
         use HandlePacketAction::*;
 
         let current_term = self.term.load(Ordering::Relaxed);
@@ -426,7 +432,7 @@ where
                 _ = status_interval.tick() => {
                     let term = self.term.load(Ordering::Relaxed);
                     let last_index = self.journal.last_index().map(|i| i.to_string()).unwrap_or_else(|| "X".to_string());
-                    let commit_index = self.journal.commit_index();
+                    let commit_index = self.journal.commit_index().map(|i| i.to_string()).unwrap_or_else(|| "X".to_string());
                     let status_string = format!("\x1Bk{}[t{},i{},c{}]\x1B", self.state, term, last_index, commit_index);
                     let _yeet = stdout.write_all(status_string.as_bytes()).await;
                     let _yeet = stdout.flush().await;

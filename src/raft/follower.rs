@@ -83,7 +83,10 @@ where
         Ok(HandlePacketAction::ChangeState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    pub(super) async fn handle_packet(
+        &self,
+        packet: Packet<V>,
+    ) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -210,17 +213,11 @@ where
             // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
             let last_entry_index = self.journal.last_index();
             if let Some(last_entry_index) = last_entry_index {
-                let commit_index = self
-                    .journal
-                    .commit_index
-                    .load(Ordering::Acquire)
-                    .try_into()?;
+                let commit_index = self.journal.commit_index();
                 if *leader_commit > commit_index {
-                    let commit_index = std::cmp::min(*leader_commit, last_entry_index);
+                    let commit_index = std::cmp::min(leader_commit.unwrap(), last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    self.journal
-                        .commit_index
-                        .store(commit_index.try_into()?, Ordering::Release);
+                    self.journal.set_commit_index(commit_index);
                 }
             }
 

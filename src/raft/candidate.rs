@@ -92,7 +92,10 @@ where
         Ok(HandlePacketAction::MaintainState(None))
     }
 
-    pub(super) async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    pub(super) async fn handle_packet(
+        &self,
+        packet: Packet<V>,
+    ) -> Result<HandlePacketAction<V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -103,9 +106,17 @@ where
             }))),
             VoteResponse { .. } => self.handle_voteresponse(&packet).await,
             // Candidates ignore these packets
-            AppendEntries { .. } | AppendEntriesAck { .. } => {
-                Ok(HandlePacketAction::MaintainState(None))
+            AppendEntries { .. } => {
+                let current_term = self.term.load(Ordering::Acquire);
+                let action = if packet.term >= current_term {
+                    HandlePacketAction::ChangeState(Some(packet))
+                } else {
+                    warn!(?packet.peer, ?packet.term, "got AppendEntries from a previous term");
+                    HandlePacketAction::MaintainState(None)
+                };
+                Ok(action)
             }
+            AppendEntriesAck { .. } => Ok(HandlePacketAction::MaintainState(None)),
         }
     }
 

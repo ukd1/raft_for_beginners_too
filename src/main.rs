@@ -53,14 +53,14 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                     Err(ServerError::Unavailable(_)) => {
                         this.state_change().await;
                         continue;
-                    },
+                    }
                     Err(ServerError::NotLeader(l)) => {
                         tracing::error!(leader = ?l, "request sent to follower, OOPS");
                         this.state_change().await;
                         continue;
                     }
                     Err(e) => tracing::error!(error = %e, "request error"),
-                    Ok(_) => {},
+                    Ok(_) => {}
                 }
                 tracing::info!(%i, "test request added to journal");
                 i += 1;
