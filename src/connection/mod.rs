@@ -6,12 +6,12 @@ use async_trait::async_trait;
 use derive_more::{From, FromStr};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use crate::journal::{JournalEntry, JournalValue};
+use crate::journal::{JournalEntry, Journalable};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Packet<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     #[serde(bound = "V: DeserializeOwned")]
     pub message_type: PacketType<D, V>,
@@ -23,8 +23,8 @@ where
 #[serde(tag = "type")]
 pub enum PacketType<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     VoteRequest {
         last_log_index: Option<u64>,
@@ -63,8 +63,8 @@ pub enum ConnectionError {
 pub trait Connection<D, V>
 where
     Self: std::fmt::Debug + Sized + Send + Sync + 'static,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError>;
     async fn send(&self, packet: Packet<D, V>) -> Result<(), ConnectionError>;

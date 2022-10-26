@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{JournalEntry, JournalValue},
+    journal::{JournalEntry, Journalable},
 };
 
 use super::{
@@ -75,8 +75,8 @@ impl Ballot {
 impl<C, D, V> Server<Follower, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Follower timeout");
@@ -294,8 +294,8 @@ where
 impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Follower, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn from(candidate: Server<Candidate, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
@@ -317,8 +317,8 @@ where
 impl<C, D, V> From<Server<Leader<V>, C, D, V>> for Server<Follower, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn from(leader: Server<Leader<V>, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(

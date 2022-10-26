@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::JournalValue,
+    journal::Journalable,
 };
 use tokio::time::Instant;
 use tracing::{debug, field, info, trace, warn, Instrument, Span};
@@ -77,8 +77,8 @@ impl Default for ElectionTally {
 pub enum ElectionResult<C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     Follower(Server<Follower, C, D, V>),
     Leader(Server<Leader<V>, C, D, V>),
@@ -87,8 +87,8 @@ where
 impl<C, D, V> Server<Candidate, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Candidate timeout");
@@ -246,8 +246,8 @@ where
 impl<C, D, V> From<Server<Follower, C, D, V>> for Server<Candidate, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn from(follower: Server<Follower, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(

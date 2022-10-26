@@ -9,7 +9,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::JournalValue,
+    journal::Journalable,
     raft::HandlePacketAction,
 };
 
@@ -19,13 +19,13 @@ use super::{
 };
 
 #[derive(Debug)]
-pub struct Leader<V: JournalValue> {
+pub struct Leader<V: Journalable> {
     pub next_index: PeerIndices,
     pub match_index: PeerIndices,
     pub requests: Mutex<VecDeque<(u64, ClientResultSender<V>)>>,
 }
 
-impl<V: JournalValue> ServerState for Leader<V> {
+impl<V: Journalable> ServerState for Leader<V> {
     fn get_timeout(&self) -> Option<Instant> {
         None
     }
@@ -34,7 +34,7 @@ impl<V: JournalValue> ServerState for Leader<V> {
     }
 }
 
-impl<V: JournalValue> Display for Leader<V> {
+impl<V: Journalable> Display for Leader<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Leader")
     }
@@ -117,8 +117,8 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
 impl<C, D, V> Server<Leader<V>, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub(super) async fn handle_packet(
         &self,
@@ -281,8 +281,8 @@ where
 impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Leader<V>, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn from(candidate: Server<Candidate, C, D, V>) -> Self {
         // figure out match index

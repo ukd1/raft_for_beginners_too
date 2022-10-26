@@ -2,10 +2,10 @@ use std::fmt::{Debug, Display};
 
 use async_trait::async_trait;
 
-use super::JournalValue;
+use super::Journalable;
 
 #[async_trait]
-pub trait ApplyEntry<V: JournalValue> {
+pub trait ApplyEntry<V: Journalable> {
     type Ok: Debug + Display;
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -13,7 +13,7 @@ pub trait ApplyEntry<V: JournalValue> {
 }
 
 #[async_trait]
-pub trait Snapshot<D: JournalValue> {
+pub trait Snapshot<D: Journalable> {
     type Error: std::error::Error + Send + Sync + 'static;
 
     async fn snapshot(&self) -> Result<D, Self::Error>;

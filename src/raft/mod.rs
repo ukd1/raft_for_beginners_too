@@ -23,7 +23,7 @@ use tokio::{
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
-use crate::journal::{Journal, JournalValue};
+use crate::journal::{Journal, Journalable};
 
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
@@ -33,7 +33,7 @@ type ClientResultSender<V> = oneshot::Sender<Result<ClientResponse, V>>;
 type ClientRequest<V> = (V, ClientResultSender<V>);
 
 #[pin_project]
-pub struct ServerHandle<V: JournalValue> {
+pub struct ServerHandle<V: Journalable> {
     #[pin]
     inner: Option<JoinHandle<Result<(), V>>>,
     requests: mpsc::Sender<ClientRequest<V>>,
@@ -41,7 +41,7 @@ pub struct ServerHandle<V: JournalValue> {
     timeout: Duration,
 }
 
-impl<V: JournalValue> ServerHandle<V> {
+impl<V: Journalable> ServerHandle<V> {
     fn new(
         inner: JoinHandle<Result<(), V>>,
         requests: mpsc::Sender<ClientRequest<V>>,
@@ -75,7 +75,7 @@ impl<V: JournalValue> ServerHandle<V> {
     }
 }
 
-impl<V: JournalValue> Future for ServerHandle<V> {
+impl<V: Journalable> Future for ServerHandle<V> {
     type Output = <JoinHandle<Result<(), V>> as Future>::Output;
 
     fn poll(
@@ -89,7 +89,7 @@ impl<V: JournalValue> Future for ServerHandle<V> {
     }
 }
 
-impl<V: JournalValue> Clone for ServerHandle<V> {
+impl<V: Journalable> Clone for ServerHandle<V> {
     fn clone(&self) -> Self {
         Self {
             inner: None,
@@ -101,7 +101,7 @@ impl<V: JournalValue> Clone for ServerHandle<V> {
 }
 
 #[derive(thiserror::Error, Debug)]
-pub enum ServerError<V: JournalValue> {
+pub enum ServerError<V: Journalable> {
     #[error(transparent)]
     ConnectionFailed(#[from] ConnectionError),
     #[error(transparent)]
@@ -125,8 +125,8 @@ pub struct Server<S, C, D, V>
 where
     S: ServerState,
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     connection: C,
     requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
@@ -140,8 +140,8 @@ where
 enum ServerImpl<'s, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     Follower(&'s Server<Follower, C, D, V>),
     Candidate(&'s Server<Candidate, C, D, V>),
@@ -150,8 +150,8 @@ where
 
 pub(crate) enum HandlePacketAction<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     MaintainState(Option<Packet<D, V>>),
     ChangeState(Option<Packet<D, V>>),
@@ -162,8 +162,8 @@ type ClientResponse = (); // TODO: something real
 impl<C, D, V> ServerImpl<'_, C, D, V>
 where
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub async fn handle_packet(&self, packet: Packet<D, V>) -> Result<HandlePacketAction<D, V>, V> {
         match self {
@@ -214,8 +214,8 @@ impl<S, C, D, V> Server<S, C, D, V>
 where
     S: ServerState,
     C: Connection<D, V>,
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
         let min = min.as_millis() as u64;

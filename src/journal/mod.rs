@@ -14,8 +14,8 @@ use tracing::{trace, warn};
 
 impl<D, V> Journal<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<D, V>>> {
         self.entries.read().expect("Journal lock was posioned")
@@ -138,8 +138,8 @@ where
 #[derive(Debug, Serialize)]
 pub struct Journal<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     entries: RwLock<Vec<JournalEntry<D, V>>>,
     commit_index: AtomicUsize,
@@ -150,8 +150,8 @@ where
 
 impl<D, V> Display for Journal<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#?}", self)
@@ -160,8 +160,8 @@ where
 
 impl<D, V> Default for Journal<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     fn default() -> Self {
         let (sender, _) = watch::channel(());
@@ -177,8 +177,8 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JournalEntry<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub term: u64, // TODO make these a u32
     #[serde(bound = "V: DeserializeOwned")]
@@ -188,8 +188,8 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JournalEntryType<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     #[serde(bound = "D: DeserializeOwned")]
     Snapshot(D),
@@ -197,20 +197,20 @@ where
     Value(V),
 }
 
-pub trait JournalValue:
+pub trait Journalable:
     Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
 }
 
-impl<T> JournalValue for T where
+impl<T> Journalable for T where
     T: Debug + Clone + Serialize + DeserializeOwned + Send + Sync + 'static
 {
 }
 
 pub struct JournalUpdate<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     pub prev_term: u64,          // TODO make these a u32
     pub prev_index: Option<u64>, // TODO make these a u32

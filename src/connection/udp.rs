@@ -16,8 +16,8 @@ pub struct UdpConnection<D, V> {
 #[async_trait]
 impl<D, V> Connection<D, V> for UdpConnection<D, V>
 where
-    D: JournalValue,
-    V: JournalValue,
+    D: Journalable,
+    V: Journalable,
 {
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
