@@ -1,15 +1,8 @@
-mod config;
-mod connection;
-mod journal;
-mod raft;
-
 use std::error::Error;
 
 use clap::Parser;
 
-use crate::config::Config;
-use crate::connection::{udp::UdpConnection, Connection};
-use crate::raft::{Server, ServerError};
+use raft_for_beginners_too::{Config, UdpConnection, Connection, Server, ServerError};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
