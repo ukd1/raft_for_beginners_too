@@ -137,8 +137,7 @@ pub struct Journal<V: JournalValue> {
 
 impl<V: JournalValue> Display for Journal<V> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let json_value = serde_json::to_value(self).map_err(|_| fmt::Error::default())?;
-        write!(f, "{:#}", json_value)
+        write!(f, "{:#?}", self)
     }
 }
 
