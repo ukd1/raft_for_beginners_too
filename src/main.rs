@@ -54,8 +54,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         this.state_change().await;
                         continue;
                     }
-                    Err(ServerError::NotLeader(l)) => {
-                        tracing::error!(leader = ?l, "request sent to follower, OOPS");
+                    Err(ServerError::NotLeader{ leader, .. }) => {
+                        tracing::error!(?leader, "request sent to follower, OOPS");
                         this.state_change().await;
                         continue;
                     }

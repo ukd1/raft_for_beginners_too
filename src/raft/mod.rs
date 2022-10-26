@@ -113,7 +113,10 @@ pub enum ServerError<V: JournalValue> {
     #[error("client request timed out")]
     RequestTimeout(#[from] tokio::time::error::Elapsed),
     #[error("not cluster leader, can't accept requests")]
-    NotLeader(ServerAddress),
+    NotLeader{
+        leader: ServerAddress,
+        value: V,
+    },
     #[error("election in progress; try request again")]
     Unavailable(V),
     #[error("ServerHandle cloned: can only await first handle")]
@@ -178,7 +181,10 @@ where
         let send_result = match self {
             ServerImpl::Follower(f) => result_tx.send(Err(
                 match &*f.state.leader.lock().expect("leader lock poisoned") {
-                    Some(l) => ServerError::NotLeader(l.clone()),
+                    Some(l) => ServerError::NotLeader {
+                        leader: l.clone(),
+                        value,
+                    },
                     None => ServerError::Unavailable(value),
                 },
             )),
