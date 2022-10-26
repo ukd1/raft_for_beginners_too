@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     candidate::ElectionResult,
-    state::{Candidate, Leader, ServerState},
+    state::{Candidate, Leader, ServerState, CurrentState},
     HandlePacketAction, Result, Server, ServerHandle, StateResult,
 };
 
@@ -254,7 +254,7 @@ where
         let timeout =
             Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
-        let (state_tx, state_rx) = watch::channel(());
+        let (state_tx, state_rx) = watch::channel(CurrentState::Follower);
         let handle_timeout = config.request_timeout;
         let join_h = tokio::spawn(async move {
             let mut follower = Self {

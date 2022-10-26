@@ -1,6 +1,7 @@
 mod candidate;
 mod follower;
 mod leader;
+mod state;
 
 use std::any::Any;
 use std::future::Future;
@@ -24,34 +25,19 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
 use crate::journal::{Journal, JournalValue};
 
-use self::state::{Candidate, Follower, Leader, ServerState};
+use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
 pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
 type StateResult<T, V> = Result<(T, Option<Packet<V>>), V>;
 type ClientResultSender<V> = oneshot::Sender<Result<ClientResponse, V>>;
 type ClientRequest<V> = (V, ClientResultSender<V>);
-mod state {
-    use std::{
-        any::Any,
-        fmt::{Debug, Display},
-    };
-
-    use tokio::time::Instant;
-
-    pub use super::{candidate::Candidate, follower::Follower, leader::Leader};
-
-    pub trait ServerState: Debug + Display + Any + Send + Sync {
-        fn get_timeout(&self) -> Option<Instant>;
-        fn set_timeout(&self, timeout: Instant);
-    }
-}
 
 #[pin_project]
 pub struct ServerHandle<V: JournalValue> {
     #[pin]
     inner: Option<JoinHandle<Result<(), V>>>,
     requests: mpsc::Sender<ClientRequest<V>>,
-    state: watch::Receiver<()>, // TODO: enum for state
+    state: watch::Receiver<CurrentState>,
     timeout: Duration,
 }
 
@@ -59,7 +45,7 @@ impl<V: JournalValue> ServerHandle<V> {
     fn new(
         inner: JoinHandle<Result<(), V>>,
         requests: mpsc::Sender<ClientRequest<V>>,
-        state: watch::Receiver<()>,
+        state: watch::Receiver<CurrentState>,
         timeout: Duration,
     ) -> Self {
         Self {
@@ -81,9 +67,11 @@ impl<V: JournalValue> ServerHandle<V> {
             .or(Err(ServerError::RequestFailed))?
     }
 
-    pub async fn state_change(&self) {
-        let mut state = self.state.clone();
-        state.changed().await.expect("state sender dropped")
+    pub async fn state_change(&self) -> CurrentState {
+        let mut state_rx = self.state.clone();
+        state_rx.changed().await.expect("state sender dropped");
+        let state = *state_rx.borrow();
+        state
     }
 }
 
@@ -107,7 +95,7 @@ impl<V: JournalValue> Clone for ServerHandle<V> {
             inner: None,
             requests: self.requests.clone(),
             state: self.state.clone(),
-            timeout: self.timeout.clone(),
+            timeout: self.timeout,
         }
     }
 }
@@ -144,7 +132,7 @@ where
     config: crate::config::Config,
     journal: Journal<V>,
     pub state: S,
-    state_tx: watch::Sender<()>,
+    state_tx: watch::Sender<CurrentState>,
     pub term: AtomicU64,
 }
 
@@ -351,7 +339,7 @@ where
         if current_term > 0 {
             startup_span.in_scope(|| warn!("state change"));
             self.state_tx
-                .send(())
+                .send(self.downcast().into())
                 .expect("state change notification failed");
         }
 
