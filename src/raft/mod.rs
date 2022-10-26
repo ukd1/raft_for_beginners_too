@@ -28,7 +28,7 @@ use crate::journal::{Journal, JournalValue};
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
 pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
-type StateResult<T, V> = Result<(T, Option<Packet<V>>), V>;
+type StateResult<T, D, V> = Result<(T, Option<Packet<D, V>>), V>;
 type ClientResultSender<V> = oneshot::Sender<Result<ClientResponse, V>>;
 type ClientRequest<V> = (V, ClientResultSender<V>);
 
@@ -113,10 +113,7 @@ pub enum ServerError<V: JournalValue> {
     #[error("client request timed out")]
     RequestTimeout(#[from] tokio::time::error::Elapsed),
     #[error("not cluster leader, can't accept requests")]
-    NotLeader{
-        leader: ServerAddress,
-        value: V,
-    },
+    NotLeader { leader: ServerAddress, value: V },
     #[error("election in progress; try request again")]
     Unavailable(V),
     #[error("ServerHandle cloned: can only await first handle")]
@@ -124,44 +121,51 @@ pub enum ServerError<V: JournalValue> {
 }
 
 #[derive(Debug)]
-pub struct Server<S, C, V>
+pub struct Server<S, C, D, V>
 where
     S: ServerState,
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
     connection: C,
     requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
     config: crate::config::Config,
-    journal: Journal<V>,
+    journal: Journal<D, V>,
     pub state: S,
     state_tx: watch::Sender<CurrentState>,
     pub term: AtomicU64,
 }
 
-enum ServerImpl<'s, C, V>
+enum ServerImpl<'s, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    Follower(&'s Server<Follower, C, V>),
-    Candidate(&'s Server<Candidate, C, V>),
-    Leader(&'s Server<Leader<V>, C, V>),
+    Follower(&'s Server<Follower, C, D, V>),
+    Candidate(&'s Server<Candidate, C, D, V>),
+    Leader(&'s Server<Leader<V>, C, D, V>),
 }
 
-pub(crate) enum HandlePacketAction<V: JournalValue> {
-    MaintainState(Option<Packet<V>>),
-    ChangeState(Option<Packet<V>>),
+pub(crate) enum HandlePacketAction<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
+    MaintainState(Option<Packet<D, V>>),
+    ChangeState(Option<Packet<D, V>>),
 }
 
 type ClientResponse = (); // TODO: something real
 
-impl<C, V> ServerImpl<'_, C, V>
+impl<C, D, V> ServerImpl<'_, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    pub async fn handle_packet(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    pub async fn handle_packet(&self, packet: Packet<D, V>) -> Result<HandlePacketAction<D, V>, V> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
             ServerImpl::Candidate(c) => c.handle_packet(packet).await,
@@ -169,7 +173,7 @@ where
         }
     }
 
-    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
+    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         match self {
             ServerImpl::Follower(f) => f.handle_timeout().await,
             ServerImpl::Candidate(c) => c.handle_timeout().await,
@@ -206,10 +210,11 @@ where
     }
 }
 
-impl<S, C, V> Server<S, C, V>
+impl<S, C, D, V> Server<S, C, D, V>
 where
     S: ServerState,
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
@@ -231,7 +236,7 @@ where
         self.state.set_timeout(new_timeout);
     }
 
-    async fn update_term(&self, packet: &Packet<V>) -> StdResult<u64, u64> {
+    async fn update_term(&self, packet: &Packet<D, V>) -> StdResult<u64, u64> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
             info!(%packet.term, "newer term in packet");
@@ -255,13 +260,13 @@ where
         node_cnt / 2 + 1
     }
 
-    fn downcast(&self) -> ServerImpl<C, V> {
+    fn downcast(&self) -> ServerImpl<C, D, V> {
         let dyn_self = self as &dyn Any;
-        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, V>>() {
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, D, V>>() {
             ServerImpl::Follower(follower)
-        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, V>>() {
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, D, V>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, V>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, D, V>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);
@@ -288,7 +293,10 @@ where
             state = %self.state,
         ),
     )]
-    async fn handle_packet_downcast(&self, packet: Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_packet_downcast(
+        &self,
+        packet: Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         use HandlePacketAction::*;
 
         if self.update_term(&packet).await.is_err() {
@@ -322,7 +330,7 @@ where
             state = %self.state,
         ),
     )]
-    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<D, V>, V> {
         use HandlePacketAction::*;
 
         let mut action = self.downcast().handle_timeout().await?;
@@ -336,8 +344,8 @@ where
 
     async fn main(
         self: Arc<Self>,
-        first_packet: Option<Packet<V>>,
-    ) -> Result<Option<Packet<V>>, V> {
+        first_packet: Option<Packet<D, V>>,
+    ) -> Result<Option<Packet<D, V>>, V> {
         use HandlePacketAction::*;
 
         let current_term = self.term.load(Ordering::Relaxed);

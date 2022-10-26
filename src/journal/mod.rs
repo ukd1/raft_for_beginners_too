@@ -1,5 +1,7 @@
+mod snapshot;
+
 use std::{
-    fmt::{self, Debug, Display},
+    fmt::{Debug, Display},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         RwLock,
@@ -10,16 +12,20 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::{trace, warn};
 
-impl<V: JournalValue> Journal<V> {
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<V>>> {
+impl<D, V> Journal<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<D, V>>> {
         self.entries.read().expect("Journal lock was posioned")
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<JournalEntry<V>>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<JournalEntry<D, V>>> {
         self.entries.write().expect("Journal lock was posioned")
     }
 
-    pub fn append_entry(&self, entry: JournalEntry<V>) -> u64 {
+    pub fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
         let mut entries = self.write();
         entries.push(entry);
         let last_index = entries.len() - 1;
@@ -31,7 +37,10 @@ impl<V: JournalValue> Journal<V> {
     /// Returns: index of the appended entry
     pub fn append(&self, term: u64, value: V) -> u64 {
         let mut entries = self.write();
-        entries.push(crate::journal::JournalEntry { term, value });
+        entries.push(crate::journal::JournalEntry {
+            term,
+            value: JournalEntryType::Value(value),
+        });
         let last_index = entries.len() - 1;
         last_index.try_into().expect("journal.len() overflowed u64")
     }
@@ -41,7 +50,7 @@ impl<V: JournalValue> Journal<V> {
         self.write().truncate(index);
     }
 
-    pub fn get(&self, index: u64) -> Option<JournalEntry<V>> {
+    pub fn get(&self, index: u64) -> Option<JournalEntry<D, V>> {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.read().get(index).cloned()
     }
@@ -76,7 +85,7 @@ impl<V: JournalValue> Journal<V> {
         }
     }
 
-    pub fn get_update(&self, index: Option<u64>) -> JournalUpdate<V> {
+    pub fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
         let entries = self.read();
 
         let index = index.map(|i| usize::try_from(i).expect("index overflowed usize"));
@@ -127,21 +136,33 @@ impl<V: JournalValue> Journal<V> {
 }
 
 #[derive(Debug, Serialize)]
-pub struct Journal<V: JournalValue> {
-    entries: RwLock<Vec<JournalEntry<V>>>,
+pub struct Journal<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
+    entries: RwLock<Vec<JournalEntry<D, V>>>,
     commit_index: AtomicUsize,
     has_commits: AtomicBool,
     #[serde(skip)]
     change_sender: watch::Sender<()>,
 }
 
-impl<V: JournalValue> Display for Journal<V> {
+impl<D, V> Display for Journal<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#?}", self)
     }
 }
 
-impl<V: JournalValue> Default for Journal<V> {
+impl<D, V> Default for Journal<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     fn default() -> Self {
         let (sender, _) = watch::channel(());
         Self {
@@ -154,10 +175,26 @@ impl<V: JournalValue> Default for Journal<V> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JournalEntry<V: JournalValue> {
+pub struct JournalEntry<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     pub term: u64, // TODO make these a u32
     #[serde(bound = "V: DeserializeOwned")]
-    pub value: V,
+    pub value: JournalEntryType<D, V>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JournalEntryType<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
+    #[serde(bound = "D: DeserializeOwned")]
+    Snapshot(D),
+    #[serde(bound = "V: DeserializeOwned")]
+    Value(V),
 }
 
 pub trait JournalValue:
@@ -170,10 +207,14 @@ impl<T> JournalValue for T where
 {
 }
 
-pub struct JournalUpdate<V: JournalValue> {
+pub struct JournalUpdate<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     pub prev_term: u64,          // TODO make these a u32
     pub prev_index: Option<u64>, // TODO make these a u32
-    pub entries: Vec<JournalEntry<V>>,
+    pub entries: Vec<JournalEntry<D, V>>,
     pub commit_index: Option<u64>, // TODO make these a u32
 }
 

@@ -8,16 +8,24 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::journal::{JournalEntry, JournalValue};
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Packet<V: JournalValue> {
+pub struct Packet<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     #[serde(bound = "V: DeserializeOwned")]
-    pub message_type: PacketType<V>,
+    pub message_type: PacketType<D, V>,
     pub peer: ServerAddress,
     pub term: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
-pub enum PacketType<V: JournalValue> {
+pub enum PacketType<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     VoteRequest {
         last_log_index: Option<u64>,
         last_log_term: u64,
@@ -29,7 +37,7 @@ pub enum PacketType<V: JournalValue> {
         prev_log_index: Option<u64>,
         prev_log_term: u64,
         #[serde(bound = "V: DeserializeOwned")]
-        entries: Vec<JournalEntry<V>>,
+        entries: Vec<JournalEntry<D, V>>,
         leader_commit: Option<u64>,
     },
     AppendEntriesAck {
@@ -52,9 +60,14 @@ pub enum ConnectionError {
 }
 
 #[async_trait]
-pub trait Connection<V: JournalValue>: std::fmt::Debug + Sized + Send + Sync + 'static {
+pub trait Connection<D, V>
+where
+    Self: std::fmt::Debug + Sized + Send + Sync + 'static,
+    D: JournalValue,
+    V: JournalValue,
+{
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError>;
-    async fn send(&self, packet: Packet<V>) -> Result<(), ConnectionError>;
-    async fn receive(&self) -> Result<Packet<V>, ConnectionError>;
+    async fn send(&self, packet: Packet<D, V>) -> Result<(), ConnectionError>;
+    async fn receive(&self) -> Result<Packet<D, V>, ConnectionError>;
     fn address(&self) -> ServerAddress;
 }

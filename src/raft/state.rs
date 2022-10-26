@@ -22,12 +22,13 @@ pub enum CurrentState {
     Leader,
 }
 
-impl<'s, C, V> From<ServerImpl<'s, C, V>> for CurrentState
+impl<'s, C, D, V> From<ServerImpl<'s, C, D, V>> for CurrentState
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    fn from(server: ServerImpl<'s, C, V>) -> Self {
+    fn from(server: ServerImpl<'s, C, D, V>) -> Self {
         use ServerImpl::*;
 
         match server {

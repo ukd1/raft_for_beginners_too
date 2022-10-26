@@ -7,23 +7,29 @@ use tracing::trace;
 use super::*;
 
 #[derive(Debug)]
-pub struct UdpConnection<V> {
+pub struct UdpConnection<D, V> {
     socket: UdpSocket,
+    _snapshot: PhantomData<D>,
     _value: PhantomData<V>,
 }
 
 #[async_trait]
-impl<V: JournalValue> Connection<V> for UdpConnection<V> {
+impl<D, V> Connection<D, V> for UdpConnection<D, V>
+where
+    D: JournalValue,
+    V: JournalValue,
+{
     async fn bind(bind_socket: ServerAddress) -> Result<Self, ConnectionError> {
         trace!(?bind_socket);
         let socket = UdpSocket::bind(bind_socket.0).await?;
         Ok(Self {
             socket,
+            _snapshot: Default::default(),
             _value: Default::default(),
         })
     }
 
-    async fn send(&self, packet: Packet<V>) -> Result<(), ConnectionError> {
+    async fn send(&self, packet: Packet<D, V>) -> Result<(), ConnectionError> {
         trace!(?packet, "send");
         let data = rmp_serde::to_vec(&packet)
             .map_err(Box::from)
@@ -32,12 +38,12 @@ impl<V: JournalValue> Connection<V> for UdpConnection<V> {
         Ok(())
     }
 
-    async fn receive(&self) -> Result<Packet<V>, ConnectionError> {
+    async fn receive(&self) -> Result<Packet<D, V>, ConnectionError> {
         let mut buf = vec![0; 65536];
         let (bytes_received, peer_addr) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(bytes_received);
 
-        let mut packet: Packet<V> = rmp_serde::from_slice(&buf)
+        let mut packet: Packet<D, V> = rmp_serde::from_slice(&buf)
             .map_err(Box::from)
             .map_err(ConnectionError::Decoding)?;
         trace!(?peer_addr, ?packet, "receive");

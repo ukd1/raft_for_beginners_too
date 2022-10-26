@@ -17,7 +17,7 @@ use crate::{
 
 use super::{
     candidate::ElectionResult,
-    state::{Candidate, Leader, ServerState, CurrentState},
+    state::{Candidate, CurrentState, Leader, ServerState},
     HandlePacketAction, Result, Server, ServerHandle, StateResult,
 };
 
@@ -72,12 +72,13 @@ impl Ballot {
     }
 }
 
-impl<C, V> Server<Follower, C, V>
+impl<C, D, V> Server<Follower, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
@@ -85,8 +86,8 @@ where
 
     pub(super) async fn handle_packet(
         &self,
-        packet: Packet<V>,
-    ) -> Result<HandlePacketAction<V>, V> {
+        packet: Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -99,7 +100,10 @@ where
         }
     }
 
-    async fn handle_voterequest(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_voterequest(
+        &self,
+        packet: &Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
         let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
             PacketType::VoteRequest {
@@ -159,7 +163,10 @@ where
         Ok(HandlePacketAction::MaintainState(Some(reply)))
     }
 
-    async fn handle_appendentries(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_appendentries(
+        &self,
+        packet: &Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
 
         let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
@@ -191,7 +198,7 @@ where
 
         let match_index = if ack {
             for (packet_entry_idx, packet_entry) in entries.iter().enumerate() {
-                let maybe_existing: Option<(u64, JournalEntry<V>)> = prev_log_index
+                let maybe_existing: Option<(u64, JournalEntry<D, V>)> = prev_log_index
                     .map(|prev_log_index| prev_log_index + (packet_entry_idx as u64) + 1)
                     .and_then(|i| Some(i).zip(self.journal.get(i)));
 
@@ -240,14 +247,17 @@ where
 
     async fn run(
         self,
-        handoff_packet: Option<Packet<V>>,
-    ) -> StateResult<Server<Candidate, C, V>, V> {
+        handoff_packet: Option<Packet<D, V>>,
+    ) -> StateResult<Server<Candidate, C, D, V>, D, V> {
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((Server::<Candidate, C, V>::from(this), packet_for_candidate))
+        Ok((
+            Server::<Candidate, C, D, V>::from(this),
+            packet_for_candidate,
+        ))
     }
 
     pub fn start(connection: C, config: crate::config::Config) -> ServerHandle<V> {
@@ -281,12 +291,13 @@ where
     }
 }
 
-impl<C, V> From<Server<Candidate, C, V>> for Server<Follower, C, V>
+impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Follower, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    fn from(candidate: Server<Candidate, C, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             candidate.config.election_timeout_min,
             candidate.config.election_timeout_max,
@@ -303,12 +314,13 @@ where
     }
 }
 
-impl<C, V> From<Server<Leader<V>, C, V>> for Server<Follower, C, V>
+impl<C, D, V> From<Server<Leader<V>, C, D, V>> for Server<Follower, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    fn from(leader: Server<Leader<V>, C, V>) -> Self {
+    fn from(leader: Server<Leader<V>, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             leader.config.election_timeout_min,
             leader.config.election_timeout_max,

@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::Parser;
 
-use raft_for_beginners_too::{Config, UdpConnection, Connection, Server, ServerError};
+use raft_for_beginners_too::{Config, Connection, Server, ServerError, UdpConnection};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
                         this.state_change().await;
                         continue;
                     }
-                    Err(ServerError::NotLeader{ leader, .. }) => {
+                    Err(ServerError::NotLeader { leader, .. }) => {
                         tracing::error!(?leader, "request sent to follower, OOPS");
                         this.state_change().await;
                         continue;

@@ -25,7 +25,7 @@ impl Candidate {
     pub fn new(timeout: Instant) -> Self {
         Self {
             timeout: timeout.into(),
-            votes: ElectionTally::new(),
+            votes: ElectionTally::default(),
         }
     }
 }
@@ -51,11 +51,6 @@ pub struct ElectionTally {
 }
 
 impl ElectionTally {
-    pub fn new() -> Self {
-        Self {
-            votes: Mutex::new(HashMap::new()),
-        }
-    }
     pub fn record_vote(&self, peer: &ServerAddress, is_granted: bool) {
         let mut election_results = self.votes.lock().expect("votes Mutex poisoned");
 
@@ -71,21 +66,31 @@ impl ElectionTally {
     }
 }
 
-pub enum ElectionResult<C, V>
-where
-    C: Connection<V>,
-    V: JournalValue,
-{
-    Follower(Server<Follower, C, V>),
-    Leader(Server<Leader<V>, C, V>),
+impl Default for ElectionTally {
+    fn default() -> Self {
+        Self {
+            votes: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
-impl<C, V> Server<Candidate, C, V>
+pub enum ElectionResult<C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<V>, V> {
+    Follower(Server<Follower, C, D, V>),
+    Leader(Server<Leader<V>, C, D, V>),
+}
+
+impl<C, D, V> Server<Candidate, C, D, V>
+where
+    C: Connection<D, V>,
+    D: JournalValue,
+    V: JournalValue,
+{
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
@@ -94,8 +99,8 @@ where
 
     pub(super) async fn handle_packet(
         &self,
-        packet: Packet<V>,
-    ) -> Result<HandlePacketAction<V>, V> {
+        packet: Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -120,7 +125,10 @@ where
         }
     }
 
-    async fn handle_voteresponse(&self, packet: &Packet<V>) -> Result<HandlePacketAction<V>, V> {
+    async fn handle_voteresponse(
+        &self,
+        packet: &Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term != current_term {
             warn!(?packet.peer, ?packet.term, "got a vote response for the wrong term");
@@ -206,8 +214,8 @@ where
     )]
     pub(super) async fn run(
         self,
-        next_packet: Option<Packet<V>>,
-    ) -> StateResult<ElectionResult<C, V>, V> {
+        next_packet: Option<Packet<D, V>>,
+    ) -> StateResult<ElectionResult<C, D, V>, D, V> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -235,12 +243,13 @@ where
     }
 }
 
-impl<C, V> From<Server<Follower, C, V>> for Server<Candidate, C, V>
+impl<C, D, V> From<Server<Follower, C, D, V>> for Server<Candidate, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    fn from(follower: Server<Follower, C, V>) -> Self {
+    fn from(follower: Server<Follower, C, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             follower.config.election_timeout_min,
             follower.config.election_timeout_max,

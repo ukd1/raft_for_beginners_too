@@ -114,15 +114,16 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
     }
 }
 
-impl<C, V> Server<Leader<V>, C, V>
+impl<C, D, V> Server<Leader<V>, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
     pub(super) async fn handle_packet(
         &self,
-        packet: Packet<V>,
-    ) -> Result<HandlePacketAction<V>, V> {
+        packet: Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         use PacketType::*;
 
         match packet.message_type {
@@ -151,8 +152,8 @@ where
 
     async fn handle_appendentriesack(
         &self,
-        packet: &Packet<V>,
-    ) -> Result<HandlePacketAction<V>, V> {
+        packet: &Packet<D, V>,
+    ) -> Result<HandlePacketAction<D, V>, V> {
         // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
@@ -218,8 +219,8 @@ where
 
     pub(super) async fn run(
         self,
-        next_packet: Option<Packet<V>>,
-    ) -> StateResult<Server<Follower, C, V>, V> {
+        next_packet: Option<Packet<D, V>>,
+    ) -> StateResult<Server<Follower, C, D, V>, D, V> {
         let this = Arc::new(self);
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
@@ -277,12 +278,13 @@ where
     }
 }
 
-impl<C, V> From<Server<Candidate, C, V>> for Server<Leader<V>, C, V>
+impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Leader<V>, C, D, V>
 where
-    C: Connection<V>,
+    C: Connection<D, V>,
+    D: JournalValue,
     V: JournalValue,
 {
-    fn from(candidate: Server<Candidate, C, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, D, V>) -> Self {
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
         let next_index: PeerIndices = candidate
