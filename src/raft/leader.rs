@@ -114,9 +114,10 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
     }
 }
 
-impl<C, D, V> Server<Leader<V>, C, D, V>
+impl<C, J, D, V> Server<Leader<V>, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
@@ -220,7 +221,7 @@ where
     pub(super) async fn run(
         self,
         next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<Server<Follower, C, D, V>, D, V> {
+    ) -> StateResult<Server<Follower, C, J, D, V>, D, V> {
         let this = Arc::new(self);
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
@@ -278,13 +279,14 @@ where
     }
 }
 
-impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Leader<V>, C, D, V>
+impl<C, J, D, V> From<Server<Candidate, C, J, D, V>> for Server<Leader<V>, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    fn from(candidate: Server<Candidate, C, D, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, J, D, V>) -> Self {
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
         let next_index: PeerIndices = candidate
@@ -312,6 +314,7 @@ where
                 requests: Default::default(),
             },
             state_tx: candidate.state_tx,
+            _snapshot: candidate._snapshot,
         }
     }
 }

@@ -72,9 +72,10 @@ impl Ballot {
     }
 }
 
-impl<C, D, V> Server<Follower, C, D, V>
+impl<C, J, D, V> Server<Follower, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
@@ -248,14 +249,14 @@ where
     async fn run(
         self,
         handoff_packet: Option<Packet<D, V>>,
-    ) -> StateResult<Server<Candidate, C, D, V>, D, V> {
+    ) -> StateResult<Server<Candidate, C, J, D, V>, D, V> {
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         Ok((
-            Server::<Candidate, C, D, V>::from(this),
+            Server::<Candidate, C, J, D, V>::from(this),
             packet_for_candidate,
         ))
     }
@@ -275,6 +276,7 @@ where
                 term: 0.into(),
                 state: Follower::new(timeout),
                 state_tx,
+                _snapshot: Default::default(),
             };
             let mut packet = None;
             let mut candidate;
@@ -291,13 +293,14 @@ where
     }
 }
 
-impl<C, D, V> From<Server<Candidate, C, D, V>> for Server<Follower, C, D, V>
+impl<C, J, D, V> From<Server<Candidate, C, J, D, V>> for Server<Follower, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    fn from(candidate: Server<Candidate, C, D, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, J, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             candidate.config.election_timeout_min,
             candidate.config.election_timeout_max,
@@ -310,17 +313,19 @@ where
             journal: candidate.journal,
             state: Follower::new(timeout),
             state_tx: candidate.state_tx,
+            _snapshot: candidate._snapshot,
         }
     }
 }
 
-impl<C, D, V> From<Server<Leader<V>, C, D, V>> for Server<Follower, C, D, V>
+impl<C, J, D, V> From<Server<Leader<V>, C, J, D, V>> for Server<Follower, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    fn from(leader: Server<Leader<V>, C, D, V>) -> Self {
+    fn from(leader: Server<Leader<V>, C, J, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             leader.config.election_timeout_min,
             leader.config.election_timeout_max,
@@ -333,6 +338,7 @@ where
             journal: leader.journal,
             state: Follower::new(timeout),
             state_tx: leader.state_tx,
+            _snapshot: leader._snapshot,
         }
     }
 }

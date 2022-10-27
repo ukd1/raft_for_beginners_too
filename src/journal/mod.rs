@@ -14,7 +14,7 @@ use tracing::{trace, warn};
 
 pub trait Journal<D, V>
 where
-    Self: Debug + Display + Default,
+    Self: Debug + Display + Default + Send + Sync + 'static,
     D: Journalable,
     V: Journalable
 {

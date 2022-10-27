@@ -74,19 +74,21 @@ impl Default for ElectionTally {
     }
 }
 
-pub enum ElectionResult<C, D, V>
+pub enum ElectionResult<C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    Follower(Server<Follower, C, D, V>),
-    Leader(Server<Leader<V>, C, D, V>),
+    Follower(Server<Follower, C, J, D, V>),
+    Leader(Server<Leader<V>, C, J, D, V>),
 }
 
-impl<C, D, V> Server<Candidate, C, D, V>
+impl<C, J, D, V> Server<Candidate, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
@@ -215,7 +217,7 @@ where
     pub(super) async fn run(
         self,
         next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<ElectionResult<C, D, V>, D, V> {
+    ) -> StateResult<ElectionResult<C, J, D, V>, D, V> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -243,13 +245,14 @@ where
     }
 }
 
-impl<C, D, V> From<Server<Follower, C, D, V>> for Server<Candidate, C, D, V>
+impl<C, J, D, V> From<Server<Follower, C, J, D, V>> for Server<Candidate, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    fn from(follower: Server<Follower, C, D, V>) -> Self {
+    fn from(follower: Server<Follower, C, J, D, V>) -> Self {
         let timeout = Self::generate_random_timeout(
             follower.config.election_timeout_min,
             follower.config.election_timeout_max,
@@ -262,6 +265,7 @@ where
             journal: follower.journal,
             state: Candidate::new(timeout),
             state_tx: follower.state_tx,
+            _snapshot: follower._snapshot,
         }
     }
 }

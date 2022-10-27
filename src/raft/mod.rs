@@ -5,6 +5,7 @@ mod state;
 
 use std::any::Any;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::{result::Result as StdResult, sync::Arc};
@@ -23,7 +24,7 @@ use tokio::{
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
-use crate::journal::{Journal, VecJournal, Journalable};
+use crate::journal::{Journal, Journalable};
 
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
@@ -121,31 +122,34 @@ pub enum ServerError<V: Journalable> {
 }
 
 #[derive(Debug)]
-pub struct Server<S, C, D, V>
+pub struct Server<S, C, J, D, V>
 where
     S: ServerState,
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
     connection: C,
     requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
     config: crate::config::Config,
-    journal: VecJournal<D, V>,
+    journal: J,
     pub state: S,
     state_tx: watch::Sender<CurrentState>,
     pub term: AtomicU64,
+    _snapshot: PhantomData<D>,
 }
 
-enum ServerImpl<'s, C, D, V>
+enum ServerImpl<'s, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    Follower(&'s Server<Follower, C, D, V>),
-    Candidate(&'s Server<Candidate, C, D, V>),
-    Leader(&'s Server<Leader<V>, C, D, V>),
+    Follower(&'s Server<Follower, C, J, D, V>),
+    Candidate(&'s Server<Candidate, C, J, D, V>),
+    Leader(&'s Server<Leader<V>, C, J, D, V>),
 }
 
 pub(crate) enum HandlePacketAction<D, V>
@@ -159,9 +163,10 @@ where
 
 type ClientResponse = (); // TODO: something real
 
-impl<C, D, V> ServerImpl<'_, C, D, V>
+impl<C, J, D, V> ServerImpl<'_, C, J, D, V>
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
@@ -193,6 +198,8 @@ where
                 },
             )),
             ServerImpl::Candidate(_) => result_tx.send(Err(ServerError::Unavailable(value))),
+            // TODO: remove allow when returning a result value in the future
+            #[allow(clippy::unit_arg)]
             ServerImpl::Leader(l) => Ok(l.handle_clientrequest(value, result_tx).await),
         };
         if let Err(Err(e)) = send_result {
@@ -210,10 +217,11 @@ where
     }
 }
 
-impl<S, C, D, V> Server<S, C, D, V>
+impl<S, C, J, D, V> Server<S, C, J, D, V>
 where
     S: ServerState,
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
@@ -260,13 +268,13 @@ where
         node_cnt / 2 + 1
     }
 
-    fn downcast(&self) -> ServerImpl<C, D, V> {
+    fn downcast(&self) -> ServerImpl<C, J, D, V> {
         let dyn_self = self as &dyn Any;
-        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, D, V>>() {
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, J, D, V>>() {
             ServerImpl::Follower(follower)
-        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, D, V>>() {
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, J, D, V>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, D, V>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, J, D, V>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);

@@ -5,7 +5,7 @@ use std::{
 
 use tokio::time::Instant;
 
-use crate::{connection::Connection, journal::Journalable};
+use crate::{connection::Connection, journal::{Journalable, Journal}};
 
 use super::ServerImpl;
 pub use super::{candidate::Candidate, follower::Follower, leader::Leader};
@@ -22,13 +22,14 @@ pub enum CurrentState {
     Leader,
 }
 
-impl<'s, C, D, V> From<ServerImpl<'s, C, D, V>> for CurrentState
+impl<'s, C, J, D, V> From<ServerImpl<'s, C, J, D, V>> for CurrentState
 where
     C: Connection<D, V>,
+    J: Journal<D, V>,
     D: Journalable,
     V: Journalable,
 {
-    fn from(server: ServerImpl<'s, C, D, V>) -> Self {
+    fn from(server: ServerImpl<'s, C, J, D, V>) -> Self {
         use ServerImpl::*;
 
         match server {
