@@ -12,7 +12,36 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::watch;
 use tracing::{trace, warn};
 
-impl<D, V> Journal<D, V>
+pub trait Journal<D, V>
+where
+    Self: Debug + Display + Default,
+    D: Journalable,
+    V: Journalable
+{
+    fn append_entry(&self, entry: JournalEntry<D, V>) -> u64;
+    fn append(&self, term: u64, value: V) -> u64;
+    fn truncate(&self, index: u64);
+    fn get(&self, index: u64) -> Option<JournalEntry<D, V>>;
+    fn last_index(&self) -> Option<u64>;
+    fn commit_index(&self) -> Option<u64>;
+    fn set_commit_index(&self, index: u64);
+    fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V>;
+    fn subscribe(&self) -> watch::Receiver<()>;
+}
+
+#[derive(Debug)]
+pub struct VecJournal<D, V>
+where
+    D: Journalable,
+    V: Journalable,
+{
+    entries: RwLock<Vec<JournalEntry<D, V>>>,
+    commit_index: AtomicUsize,
+    has_commits: AtomicBool,
+    change_sender: watch::Sender<()>,
+}
+
+impl<D, V> VecJournal<D, V>
 where
     D: Journalable,
     V: Journalable,
@@ -25,7 +54,18 @@ where
         self.entries.write().expect("Journal lock was posioned")
     }
 
-    pub fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.read().len()
+    }
+}
+
+impl<D, V> Journal<D, V> for VecJournal<D, V>
+where
+    D: Journalable,
+    V: Journalable,
+{
+    fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
         let mut entries = self.write();
         entries.push(entry);
         let last_index = entries.len() - 1;
@@ -35,7 +75,7 @@ where
     /// Append a command to the journal
     ///
     /// Returns: index of the appended entry
-    pub fn append(&self, term: u64, value: V) -> u64 {
+    fn append(&self, term: u64, value: V) -> u64 {
         let mut entries = self.write();
         entries.push(crate::journal::JournalEntry {
             term,
@@ -45,18 +85,18 @@ where
         last_index.try_into().expect("journal.len() overflowed u64")
     }
 
-    pub fn truncate(&self, index: u64) {
+    fn truncate(&self, index: u64) {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.write().truncate(index);
     }
 
-    pub fn get(&self, index: u64) -> Option<JournalEntry<D, V>> {
+    fn get(&self, index: u64) -> Option<JournalEntry<D, V>> {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.read().get(index).cloned()
     }
 
     // lastApplied
-    pub fn last_index(&self) -> Option<u64> {
+    fn last_index(&self) -> Option<u64> {
         let len = self.read().len();
         let last_index = if len > 0 {
             len - 1
@@ -67,7 +107,7 @@ where
         Some(last_index)
     }
 
-    pub fn commit_index(&self) -> Option<u64> {
+    fn commit_index(&self) -> Option<u64> {
         let has_entries = self.has_commits.load(Ordering::Acquire);
         has_entries.then(|| {
             self.commit_index
@@ -77,7 +117,7 @@ where
         })
     }
 
-    pub fn set_commit_index(&self, index: u64) {
+    fn set_commit_index(&self, index: u64) {
         let index: usize = index.try_into().expect("index overflowed usize");
         let prev_commit = self.commit_index.swap(index, Ordering::Release);
         if prev_commit == 0 {
@@ -85,7 +125,7 @@ where
         }
     }
 
-    pub fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
+    fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
         let entries = self.read();
 
         let index = index.map(|i| usize::try_from(i).expect("index overflowed usize"));
@@ -125,30 +165,12 @@ where
         }
     }
 
-    pub fn subscribe(&self) -> watch::Receiver<()> {
+    fn subscribe(&self) -> watch::Receiver<()> {
         self.change_sender.subscribe()
     }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.read().len()
-    }
 }
 
-#[derive(Debug, Serialize)]
-pub struct Journal<D, V>
-where
-    D: Journalable,
-    V: Journalable,
-{
-    entries: RwLock<Vec<JournalEntry<D, V>>>,
-    commit_index: AtomicUsize,
-    has_commits: AtomicBool,
-    #[serde(skip)]
-    change_sender: watch::Sender<()>,
-}
-
-impl<D, V> Display for Journal<D, V>
+impl<D, V> Display for VecJournal<D, V>
 where
     D: Journalable,
     V: Journalable,
@@ -158,7 +180,7 @@ where
     }
 }
 
-impl<D, V> Default for Journal<D, V>
+impl<D, V> Default for VecJournal<D, V>
 where
     D: Journalable,
     V: Journalable,

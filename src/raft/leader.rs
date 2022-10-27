@@ -9,7 +9,7 @@ use tracing::{debug, trace, warn};
 
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::Journalable,
+    journal::{Journal, Journalable},
     raft::HandlePacketAction,
 };
 

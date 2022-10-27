@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{JournalEntry, Journalable},
+    journal::{Journal, JournalEntry, Journalable},
 };
 
 use super::{

@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::Journalable,
+    journal::{Journal, Journalable},
 };
 use tokio::time::Instant;
 use tracing::{debug, field, info, trace, warn, Instrument, Span};

@@ -23,7 +23,7 @@ use tokio::{
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
-use crate::journal::{Journal, Journalable};
+use crate::journal::{Journal, VecJournal, Journalable};
 
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
@@ -131,7 +131,7 @@ where
     connection: C,
     requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
     config: crate::config::Config,
-    journal: Journal<D, V>,
+    journal: VecJournal<D, V>,
     pub state: S,
     state_tx: watch::Sender<CurrentState>,
     pub term: AtomicU64,
