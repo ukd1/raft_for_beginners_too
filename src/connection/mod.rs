@@ -1,4 +1,4 @@
-pub mod udp;
+mod udp;
 
 use std::{error::Error, net::SocketAddr};
 
@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use derive_more::{From, FromStr};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+pub use self::udp::UdpConnection;
 use crate::journal::{JournalEntry, Journalable};
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Packet<D, V>
 where

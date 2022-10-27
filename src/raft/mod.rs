@@ -23,10 +23,9 @@ use tokio::{
 };
 use tracing::{debug, error, info, info_span, warn, Instrument};
 
+use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
 use crate::journal::{Journal, Journalable};
-
-use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 
 pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
 type StateResult<T, D, V> = Result<(T, Option<Packet<D, V>>), V>;

@@ -1,8 +1,11 @@
 use std::error::Error;
 
 use clap::Parser;
-
-use raft_for_beginners_too::{Config, Connection, Server, ServerError, UdpConnection};
+use raft_for_beginners_too::{
+    connection::{Connection, UdpConnection},
+    journal::mem::VecJournal,
+    Config, Server, ServerError,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
@@ -27,7 +30,8 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     // assert_lesser_than!(opts.election_timeout_min, opts.election_timeout_max);
 
     let connection = UdpConnection::bind(opts.listen_socket.clone()).await?;
-    let server_handle = Server::start(connection, opts);
+    let journal = VecJournal::default();
+    let server_handle = Server::start(connection, journal, opts);
     //
     // DEBUG: test client events generator
     //

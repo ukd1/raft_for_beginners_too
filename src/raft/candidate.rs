@@ -4,6 +4,9 @@ use std::{
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
 };
 
+use tokio::time::Instant;
+use tracing::{debug, field, info, trace, warn, Instrument, Span};
+
 use super::{
     state::{Follower, Leader, ServerState},
     HandlePacketAction, Result, Server, StateResult,
@@ -12,8 +15,6 @@ use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
     journal::{Journal, Journalable},
 };
-use tokio::time::Instant;
-use tracing::{debug, field, info, trace, warn, Instrument, Span};
 
 #[derive(Debug)]
 pub struct Candidate {

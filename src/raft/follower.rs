@@ -10,15 +10,14 @@ use tokio::{
 };
 use tracing::{debug, info, warn};
 
-use crate::{
-    connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, JournalEntry, Journalable},
-};
-
 use super::{
     candidate::ElectionResult,
     state::{Candidate, CurrentState, Leader, ServerState},
     HandlePacketAction, Result, Server, ServerHandle, StateResult,
+};
+use crate::{
+    connection::{Connection, Packet, PacketType, ServerAddress},
+    journal::{Journal, JournalEntry, Journalable},
 };
 
 #[derive(Debug)]
@@ -261,7 +260,7 @@ where
         ))
     }
 
-    pub fn start(connection: C, config: crate::config::Config) -> ServerHandle<V> {
+    pub fn start(connection: C, journal: J, config: crate::config::Config) -> ServerHandle<V> {
         let timeout =
             Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
@@ -272,7 +271,7 @@ where
                 connection,
                 requests: requests_rx.into(),
                 config,
-                journal: Default::default(),
+                journal,
                 term: 0.into(),
                 state: Follower::new(timeout),
                 state_tx,

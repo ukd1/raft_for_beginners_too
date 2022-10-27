@@ -7,15 +7,14 @@ use std::{
 use tokio::time::{timeout, Instant};
 use tracing::{debug, trace, warn};
 
+use super::{
+    state::{Candidate, Follower, ServerState},
+    ClientResultSender, Result, Server, StateResult,
+};
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
     journal::{Journal, Journalable},
     raft::HandlePacketAction,
-};
-
-use super::{
-    state::{Candidate, Follower, ServerState},
-    ClientResultSender, Result, Server, StateResult,
 };
 
 #[derive(Debug)]
