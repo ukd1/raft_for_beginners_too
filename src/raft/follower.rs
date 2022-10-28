@@ -5,10 +5,10 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{mpsc, watch, oneshot},
     time::Instant,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, info, warn, error, info_span, Instrument};
 
 use super::{
     candidate::ElectionResult,
@@ -222,9 +222,37 @@ where
             if let Some(last_entry_index) = last_entry_index {
                 let commit_index = self.journal.commit_index();
                 if *leader_commit > commit_index {
+                    let prev_commit = commit_index.unwrap_or(0);
                     let commit_index = std::cmp::min(leader_commit.unwrap(), last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    self.journal.set_commit_index(commit_index);
+                    let (results_tx, results): (Vec<_>, Vec<_>) = (prev_commit..=commit_index).into_iter()
+                        .map(|i| {
+                            let (tx, rx) = oneshot::channel();
+                            ((i, tx), (i, rx))
+                        })
+                        .unzip();
+                    self.journal.commit_and_apply(commit_index, results_tx);
+                    let request_timeout = self.config.request_timeout;
+                    tokio::spawn(async move {
+                        use futures::future::join_all;
+                        use tokio::time::timeout;
+
+                        let (indices, receivers): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+                        // Wrap each result receiver in a timeout
+                        let receivers = receivers.into_iter()
+                            .map(|r| timeout(request_timeout, r));
+                        // Await all results or timeouts
+                        let results = join_all(receivers).await;
+                        // Re-attach journal indices to results for logging
+                        let results = indices.into_iter().zip(results);
+                        for (index, result) in results {
+                            match result {
+                                Err(_) => error!(%index, "applying journal entry timed out"),
+                                Ok(Err(error)) => error!(%index, %error, "error applying journal entry"),
+                                Ok(Ok(result)) => debug!(?result, "successfully applied journal entry"),
+                            }
+                        }
+                    }.instrument(info_span!("apply_committed_entries", %commit_index)));
                 }
             }
 

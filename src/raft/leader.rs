@@ -5,7 +5,7 @@ use std::{
 };
 
 use tokio::time::{timeout, Instant};
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use super::{
     state::{Candidate, Follower, ServerState},
@@ -179,29 +179,15 @@ where
                     let match_index_term = self.journal.get(match_index).map_or(0, |e| e.term);
                     trace!(%quorum, %quorum_index, %current_term, %match_index_term, "checking commit index quorum");
                     if match_index <= quorum_index && match_index_term == current_term {
-                        self.journal.set_commit_index(match_index);
-                        debug!(commit_index = %match_index, "updated commit index");
-
-                        {
+                        let requests_to_commit = {
                             let mut requests =
                                 self.state.requests.lock().expect("requests lock poisoned");
-                            loop {
-                                match requests.pop_front() {
-                                    Some((index, result_tx)) if index <= match_index => {
-                                        trace!(%index, "found response sender for committed value");
-                                        let result = result_tx.send(Ok(()));
-                                        if result.is_err() {
-                                            warn!(%index, "client request dropped");
-                                        }
-                                    }
-                                    Some(r) => {
-                                        requests.push_front(r);
-                                        break;
-                                    }
-                                    None => break,
-                                };
-                            }
-                        }
+                            let last_committed_request_index = requests.partition_point(|&(i, _)| i <= match_index);
+                            requests.drain(0..last_committed_request_index)
+                        };
+
+                        self.journal.commit_and_apply(match_index, requests_to_commit);
+                        debug!(commit_index = %match_index, "updated commit index");
                     }
                 }
             }

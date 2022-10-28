@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
-use std::sync::Mutex;
+use std::sync::{Mutex, Arc};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     RwLock,
@@ -25,7 +26,7 @@ where
     pub(crate) commit_index: AtomicUsize,
     pub(crate) has_commits: AtomicBool,
     pub(crate) change_sender: watch::Sender<()>,
-    storage: W,
+    storage: Arc<W>,
 }
 
 impl<D, V, W> VecJournal<D, V, W>
@@ -42,6 +43,14 @@ where
         self.entries.write().expect("Journal lock was posioned")
     }
 
+    fn set_commit_index(&self, index: usize) -> usize {
+        let prev_commit = self.commit_index.swap(index, Ordering::Release);
+        if prev_commit == 0 {
+            self.has_commits.store(true, Ordering::Release);
+        }
+        prev_commit
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.read().len()
@@ -54,6 +63,9 @@ where
     V: Journalable,
     W: ApplyEntry<V> + Snapshot<V>,
 {
+    type Ok = <W as ApplyEntry<V>>::Ok;
+    type Error = <W as ApplyEntry<V>>::Error;
+
     fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
         let mut entries = self.write();
         entries.push(entry);
@@ -106,12 +118,36 @@ where
         })
     }
 
-    fn set_commit_index(&self, index: u64) {
-        let index: usize = index.try_into().expect("index overflowed usize");
-        let prev_commit = self.commit_index.swap(index, Ordering::Release);
-        if prev_commit == 0 {
-            self.has_commits.store(true, Ordering::Release);
-        }
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<Self::Ok, Self::Error>>)>) {
+        let commit_index: usize = index.try_into().expect("index overflowed usize");
+        let prev_commit = self.set_commit_index(commit_index);
+        let begin_apply_range = prev_commit + 1;
+        let committed_entries: Vec<_> = self.read()[begin_apply_range..=commit_index].iter()
+            // Enumerate and index using original index
+            .enumerate()
+            .map(|(offset, entry)| (begin_apply_range + offset, entry))
+            // Exclude snapshots
+            .filter_map(|(i, &e)| match e.value {
+                JournalEntryType::Value(v) => Some((i, v.clone())),
+                _ => None,
+            })
+            .collect();
+
+        let results: HashMap<usize, _> = results.into_iter()
+            .map(|(i, r)| (i.try_into().expect("index overflowed usize"), r))
+            .collect();
+        let apply_storage = Arc::clone(&self.storage);
+        tokio::spawn(async move {
+            for (index, entry) in committed_entries {
+                let result = apply_storage.apply(entry).await;
+                if let Some(sender) = results.remove(&index) {
+                    let send_result = sender.send(result);
+                    if send_result.is_err() {
+                        warn!(%index, "result receiver was dropped");
+                    }
+                }
+            }
+        });
     }
 
     fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
@@ -181,7 +217,7 @@ where
             commit_index: 0.into(),
             has_commits: false.into(),
             change_sender: sender,
-            storage: MemValue::default(),
+            storage: MemValue::default().into(),
         }
     }
 }

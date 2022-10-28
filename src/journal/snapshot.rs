@@ -6,7 +6,7 @@ use super::Journalable;
 
 #[async_trait]
 pub trait ApplyEntry<V: Journalable>: Debug + Send + Sync + 'static {
-    type Ok: Debug;
+    type Ok: Debug + Send + Sync;
     type Error: std::error::Error + Send + Sync + 'static;
 
     async fn apply(&self, entry: V) -> Result<Self::Ok, Self::Error>;

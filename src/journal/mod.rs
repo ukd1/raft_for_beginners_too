@@ -4,7 +4,7 @@ mod snapshot;
 use std::fmt::{Debug, Display};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::sync::watch;
+use tokio::sync::{watch, oneshot};
 
 pub trait Journal<D, V>
 where
@@ -12,13 +12,17 @@ where
     D: Journalable,
     V: Journalable,
 {
+    type Ok: Debug + Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
+
     fn append_entry(&self, entry: JournalEntry<D, V>) -> u64;
     fn append(&self, term: u64, value: V) -> u64;
     fn truncate(&self, index: u64);
     fn get(&self, index: u64) -> Option<JournalEntry<D, V>>;
     fn last_index(&self) -> Option<u64>;
     fn commit_index(&self) -> Option<u64>;
-    fn set_commit_index(&self, index: u64);
+    // fn set_commit_index(&self, index: u64);
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<Self::Ok, Self::Error>>)>);
     fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V>;
     fn subscribe(&self) -> watch::Receiver<()>;
 }
