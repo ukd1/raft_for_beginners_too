@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    fmt::Display,
+    fmt::{Display, Debug},
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
 };
 
@@ -13,18 +13,26 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, Journalable},
+    journal::{Journal, Journalable, ApplyResult},
     raft::HandlePacketAction,
 };
 
 #[derive(Debug)]
-pub struct Leader<V: Journalable> {
+pub struct Leader<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     pub next_index: PeerIndices,
     pub match_index: PeerIndices,
-    pub requests: Mutex<VecDeque<(u64, ClientResultSender<V>)>>,
+    pub requests: Mutex<VecDeque<(u64, ClientResultSender<V, R>)>>,
 }
 
-impl<V: Journalable> ServerState for Leader<V> {
+impl<V, R> ServerState for Leader<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     fn get_timeout(&self) -> Option<Instant> {
         None
     }
@@ -33,7 +41,11 @@ impl<V: Journalable> ServerState for Leader<V> {
     }
 }
 
-impl<V: Journalable> Display for Leader<V> {
+impl<V, R> Display for Leader<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Leader")
     }
@@ -113,12 +125,13 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
     }
 }
 
-impl<C, J, D, V> Server<Leader<V>, C, J, D, V>
+impl<C, J, D, V, R> Server<Leader<V, R>, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     pub(super) async fn handle_packet(
         &self,
@@ -135,7 +148,7 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V>) {
+    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V, R>) {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
@@ -179,11 +192,11 @@ where
                     let match_index_term = self.journal.get(match_index).map_or(0, |e| e.term);
                     trace!(%quorum, %quorum_index, %current_term, %match_index_term, "checking commit index quorum");
                     if match_index <= quorum_index && match_index_term == current_term {
-                        let requests_to_commit = {
+                        let requests_to_commit: Vec<_> = {
                             let mut requests =
                                 self.state.requests.lock().expect("requests lock poisoned");
                             let last_committed_request_index = requests.partition_point(|&(i, _)| i <= match_index);
-                            requests.drain(0..last_committed_request_index)
+                            requests.drain(0..last_committed_request_index).collect()
                         };
 
                         self.journal.commit_and_apply(match_index, requests_to_commit);
@@ -206,7 +219,7 @@ where
     pub(super) async fn run(
         self,
         next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<Server<Follower, C, J, D, V>, D, V> {
+    ) -> StateResult<Server<Follower, C, J, D, V, R>, D, V> {
         let this = Arc::new(self);
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
@@ -264,14 +277,15 @@ where
     }
 }
 
-impl<C, J, D, V> From<Server<Candidate, C, J, D, V>> for Server<Leader<V>, C, J, D, V>
+impl<C, J, D, V, R> From<Server<Candidate, C, J, D, V, R>> for Server<Leader<V, R>, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    fn from(candidate: Server<Candidate, C, J, D, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, J, D, V, R>) -> Self {
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
         let next_index: PeerIndices = candidate
@@ -300,6 +314,7 @@ where
             },
             state_tx: candidate.state_tx,
             _snapshot: candidate._snapshot,
+            _apply: candidate._apply,
         }
     }
 }

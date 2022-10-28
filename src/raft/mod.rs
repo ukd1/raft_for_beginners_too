@@ -25,26 +25,35 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
-use crate::journal::{Journal, Journalable};
+use crate::journal::{Journal, Journalable, ApplyResult};
 
 pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
 type StateResult<T, D, V> = Result<(T, Option<Packet<D, V>>), V>;
-type ClientResultSender<V> = oneshot::Sender<Result<ClientResponse, V>>;
-type ClientRequest<V> = (V, ClientResultSender<V>);
+type ClientResultSender<V, R> = oneshot::Sender<Result<R, V>>;
+type ClientRequest<V, R> = (V, ClientResultSender<V, R>);
 
 #[pin_project]
-pub struct ServerHandle<V: Journalable> {
+pub struct ServerHandle<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     #[pin]
     inner: Option<JoinHandle<Result<(), V>>>,
-    requests: mpsc::Sender<ClientRequest<V>>,
+    requests: mpsc::Sender<ClientRequest<V, R>>,
     state: watch::Receiver<CurrentState>,
     timeout: Duration,
+    _send_ok: PhantomData<R>,
 }
 
-impl<V: Journalable> ServerHandle<V> {
+impl<V, R> ServerHandle<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     fn new(
         inner: JoinHandle<Result<(), V>>,
-        requests: mpsc::Sender<ClientRequest<V>>,
+        requests: mpsc::Sender<ClientRequest<V, R>>,
         state: watch::Receiver<CurrentState>,
         timeout: Duration,
     ) -> Self {
@@ -53,18 +62,21 @@ impl<V: Journalable> ServerHandle<V> {
             requests,
             state,
             timeout,
+            _send_ok: Default::default(),
         }
     }
 
-    pub async fn send(&self, value: V) -> Result<ClientResponse, V> {
+    pub async fn send(&self, value: V) -> Result<R, V> {
         let (result_tx, result_rx) = oneshot::channel();
         self.requests
             .send((value, result_tx))
             .await
             .or(Err(ServerError::RequestFailed))?;
-        timeout(self.timeout, result_rx)
+        let result = timeout(self.timeout, result_rx)
             .await?
-            .or(Err(ServerError::RequestFailed))?
+            .or(Err(ServerError::RequestFailed))?;
+        result
+            .map_err(|e| ServerError::RequestError(Box::new(e)))
     }
 
     pub async fn state_change(&self) -> CurrentState {
@@ -75,7 +87,11 @@ impl<V: Journalable> ServerHandle<V> {
     }
 }
 
-impl<V: Journalable> Future for ServerHandle<V> {
+impl<V, R> Future for ServerHandle<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     type Output = <JoinHandle<Result<(), V>> as Future>::Output;
 
     fn poll(
@@ -89,13 +105,18 @@ impl<V: Journalable> Future for ServerHandle<V> {
     }
 }
 
-impl<V: Journalable> Clone for ServerHandle<V> {
+impl<V, R> Clone for ServerHandle<V, R>
+where
+    V: Journalable,
+    R: ApplyResult
+{
     fn clone(&self) -> Self {
         Self {
             inner: None,
             requests: self.requests.clone(),
             state: self.state.clone(),
             timeout: self.timeout,
+            _send_ok: self._send_ok,
         }
     }
 }
@@ -112,6 +133,8 @@ pub enum ServerError<V: Journalable> {
     RequestFailed,
     #[error("client request timed out")]
     RequestTimeout(#[from] tokio::time::error::Elapsed),
+    #[error(transparent)]
+    RequestError(Box<dyn std::error::Error + Send + Sync + 'static>),
     #[error("not cluster leader, can't accept requests")]
     NotLeader { leader: ServerAddress, value: V },
     #[error("election in progress; try request again")]
@@ -121,34 +144,37 @@ pub enum ServerError<V: Journalable> {
 }
 
 #[derive(Debug)]
-pub struct Server<S, C, J, D, V>
+pub struct Server<S, C, J, D, V, R>
 where
     S: ServerState,
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     connection: C,
-    requests: Mutex<mpsc::Receiver<ClientRequest<V>>>,
+    requests: Mutex<mpsc::Receiver<ClientRequest<V, R>>>,
     config: crate::config::Config,
     journal: J,
     pub state: S,
     state_tx: watch::Sender<CurrentState>,
     pub term: AtomicU64,
     _snapshot: PhantomData<D>,
+    _apply: PhantomData<fn() -> R>,
 }
 
-enum ServerImpl<'s, C, J, D, V>
+enum ServerImpl<'s, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    Follower(&'s Server<Follower, C, J, D, V>),
-    Candidate(&'s Server<Candidate, C, J, D, V>),
-    Leader(&'s Server<Leader<V>, C, J, D, V>),
+    Follower(&'s Server<Follower, C, J, D, V, R>),
+    Candidate(&'s Server<Candidate, C, J, D, V, R>),
+    Leader(&'s Server<Leader<V, R>, C, J, D, V, R>),
 }
 
 pub(crate) enum HandlePacketAction<D, V>
@@ -160,14 +186,13 @@ where
     ChangeState(Option<Packet<D, V>>),
 }
 
-type ClientResponse = (); // TODO: something real
-
-impl<C, J, D, V> ServerImpl<'_, C, J, D, V>
+impl<C, J, D, V, R> ServerImpl<'_, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     pub async fn handle_packet(&self, packet: Packet<D, V>) -> Result<HandlePacketAction<D, V>, V> {
         match self {
@@ -185,7 +210,7 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V>) {
+    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V, R>) {
         let send_result = match self {
             ServerImpl::Follower(f) => result_tx.send(Err(
                 match &*f.state.leader.lock().expect("leader lock poisoned") {
@@ -216,13 +241,14 @@ where
     }
 }
 
-impl<S, C, J, D, V> Server<S, C, J, D, V>
+impl<S, C, J, D, V, R> Server<S, C, J, D, V, R>
 where
     S: ServerState,
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     fn generate_random_timeout(min: Duration, max: Duration) -> Instant {
         let min = min.as_millis() as u64;
@@ -267,13 +293,13 @@ where
         node_cnt / 2 + 1
     }
 
-    fn downcast(&self) -> ServerImpl<C, J, D, V> {
+    fn downcast(&self) -> ServerImpl<C, J, D, V, R> {
         let dyn_self = self as &dyn Any;
-        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, J, D, V>>() {
+        if let Some(follower) = dyn_self.downcast_ref::<Server<Follower, C, J, D, V, R>>() {
             ServerImpl::Follower(follower)
-        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, J, D, V>>() {
+        } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, J, D, V, R>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V>, C, J, D, V>>() {
+        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<V, R>, C, J, D, V, R>>() {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);
@@ -288,7 +314,7 @@ where
         ),
     )]
 
-    async fn handle_request_downcast(&self, value: V, result_tx: ClientResultSender<V>) {
+    async fn handle_request_downcast(&self, value: V, result_tx: ClientResultSender<V, R>) {
         self.downcast().handle_clientrequest(value, result_tx).await;
     }
 
@@ -435,7 +461,8 @@ where
         loop {
             tokio::select! {
                 _ = usr1_stream.recv() => {
-                    info!("SIGUSR1");
+                    let snapshot = self.journal.snapshot_without_commit().await; // DEBUG
+                    info!(?snapshot, "SIGUSR1");
                     debug!(target: concat!(env!("CARGO_PKG_NAME"), "::journal"), journal = %self.journal, "SIGUSR1");
                 },
                 _ = status_interval.tick() => {

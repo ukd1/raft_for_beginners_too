@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
+use std::result::Result as StdResult;
 use std::sync::{Mutex, Arc};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -10,17 +11,20 @@ use std::sync::{
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing::{trace, warn};
+use tracing::{trace, warn, error};
+
+use crate::ServerError;
+use crate::raft::Result;
 
 use super::snapshot::{ApplyEntry, Snapshot};
-use super::{Journal, JournalEntry, JournalEntryType, JournalUpdate, Journalable};
+use super::{Journal, JournalEntry, JournalEntryType, JournalUpdate, Journalable, ApplyResult};
 
 #[derive(Debug)]
 pub struct VecJournal<D, V, W>
 where
     D: Journalable,
     V: Journalable,
-    W: ApplyEntry<V> + Snapshot<V>,
+    W: ApplyEntry<V> + Snapshot<D>,
 {
     pub(crate) entries: RwLock<Vec<JournalEntry<D, V>>>,
     pub(crate) commit_index: AtomicUsize,
@@ -33,7 +37,7 @@ impl<D, V, W> VecJournal<D, V, W>
 where
     D: Journalable,
     V: Journalable,
-    W: ApplyEntry<V> + Snapshot<V>,
+    W: ApplyEntry<V> + Snapshot<D>,
 {
     fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<D, V>>> {
         self.entries.read().expect("Journal lock was posioned")
@@ -43,12 +47,14 @@ where
         self.entries.write().expect("Journal lock was posioned")
     }
 
-    fn set_commit_index(&self, index: usize) -> usize {
+    fn set_commit_index(&self, index: usize) -> Option<usize> {
         let prev_commit = self.commit_index.swap(index, Ordering::Release);
         if prev_commit == 0 {
             self.has_commits.store(true, Ordering::Release);
+            None
+        } else {
+            Some(prev_commit)
         }
-        prev_commit
     }
 
     #[cfg(test)]
@@ -57,13 +63,14 @@ where
     }
 }
 
-impl<D, V, W> Journal<D, V> for VecJournal<D, V, W>
+#[async_trait]
+impl<D, V, R, W> Journal<D, V, R> for VecJournal<D, V, W>
 where
     D: Journalable,
     V: Journalable,
-    W: ApplyEntry<V> + Snapshot<V>,
+    W: ApplyEntry<V, Ok = R> + Snapshot<D>,
+    R: ApplyResult,
 {
-    type Ok = <W as ApplyEntry<V>>::Ok;
     type Error = <W as ApplyEntry<V>>::Error;
 
     fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
@@ -118,28 +125,29 @@ where
         })
     }
 
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<Self::Ok, Self::Error>>)>) {
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<R, V>>)>) {
         let commit_index: usize = index.try_into().expect("index overflowed usize");
-        let prev_commit = self.set_commit_index(commit_index);
-        let begin_apply_range = prev_commit + 1;
+        let begin_apply_range = self.set_commit_index(commit_index)
+            .map_or(0, |i| i + 1);
         let committed_entries: Vec<_> = self.read()[begin_apply_range..=commit_index].iter()
             // Enumerate and index using original index
             .enumerate()
             .map(|(offset, entry)| (begin_apply_range + offset, entry))
             // Exclude snapshots
-            .filter_map(|(i, &e)| match e.value {
+            .filter_map(|(i, e)| match &e.value {
                 JournalEntryType::Value(v) => Some((i, v.clone())),
                 _ => None,
             })
             .collect();
 
-        let results: HashMap<usize, _> = results.into_iter()
+        let mut results: HashMap<usize, _> = results.into_iter()
             .map(|(i, r)| (i.try_into().expect("index overflowed usize"), r))
             .collect();
         let apply_storage = Arc::clone(&self.storage);
         tokio::spawn(async move {
             for (index, entry) in committed_entries {
-                let result = apply_storage.apply(entry).await;
+                let result = apply_storage.apply(entry).await
+                    .map_err(|e| ServerError::RequestError(Box::new(e)));
                 if let Some(sender) = results.remove(&index) {
                     let send_result = sender.send(result);
                     if send_result.is_err() {
@@ -148,6 +156,11 @@ where
                 }
             }
         });
+    }
+
+    async fn snapshot_without_commit(&self) -> Result<D, V> {
+        self.storage.snapshot().await
+            .map_err(|e| ServerError::RequestError(Box::new(e)))
     }
 
     fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
@@ -199,7 +212,7 @@ impl<D, V, W> Display for VecJournal<D, V, W>
 where
     D: Journalable,
     V: Journalable,
-    W: ApplyEntry<V> + Snapshot<V>,
+    W: ApplyEntry<V> + Snapshot<D>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#?}", self)
@@ -233,7 +246,7 @@ impl<V: Journalable> ApplyEntry<V> for MemValue<V, V> {
     type Ok = ();
     type Error = std::convert::Infallible;
 
-    async fn apply(&self, entry: V) -> Result<Self::Ok, Self::Error> {
+    async fn apply(&self, entry: V) -> StdResult<Self::Ok, Self::Error> {
         *self.value.lock().expect("MemValue lock poisoned") = Some(entry);
         Ok(())
     }
@@ -246,13 +259,13 @@ where
 {
     type Error = MemValueError;
 
-    async fn snapshot(&self) -> Result<V, Self::Error> {
+    async fn snapshot(&self) -> StdResult<V, Self::Error> {
         let value = self.value.lock().expect("MemValue lock poisoned");
         let value = value.clone().ok_or(MemValueError::Uninitialized)?;
         Ok(value)
     }
 
-    async fn restore(&self, snapshot: V) -> Result<(), Self::Error> {
+    async fn restore(&self, snapshot: V) -> StdResult<(), Self::Error> {
         *self.value.lock().expect("MemValue lock poisoned") = Some(snapshot);
         Ok(())
     }

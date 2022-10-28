@@ -3,16 +3,22 @@ mod snapshot;
 
 use std::fmt::{Debug, Display};
 
+use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::{watch, oneshot};
 
-pub trait Journal<D, V>
+use crate::raft::Result;
+
+pub use self::snapshot::ApplyResult;
+
+#[async_trait]
+pub trait Journal<D, V, R>
 where
     Self: Debug + Display + Send + Sync + 'static,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult,
 {
-    type Ok: Debug + Send + Sync + 'static;
     type Error: std::error::Error + Send + Sync + 'static;
 
     fn append_entry(&self, entry: JournalEntry<D, V>) -> u64;
@@ -21,8 +27,8 @@ where
     fn get(&self, index: u64) -> Option<JournalEntry<D, V>>;
     fn last_index(&self) -> Option<u64>;
     fn commit_index(&self) -> Option<u64>;
-    // fn set_commit_index(&self, index: u64);
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<Self::Ok, Self::Error>>)>);
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<R, V>>)>);
+    async fn snapshot_without_commit(&self) -> Result<D, V>;
     fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V>;
     fn subscribe(&self) -> watch::Receiver<()>;
 }

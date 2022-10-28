@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, Journalable},
+    journal::{Journal, Journalable, ApplyResult},
 };
 
 #[derive(Debug)]
@@ -75,23 +75,25 @@ impl Default for ElectionTally {
     }
 }
 
-pub enum ElectionResult<C, J, D, V>
+pub enum ElectionResult<C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    Follower(Server<Follower, C, J, D, V>),
-    Leader(Server<Leader<V>, C, J, D, V>),
+    Follower(Server<Follower, C, J, D, V, R>),
+    Leader(Server<Leader<V, R>, C, J, D, V, R>),
 }
 
-impl<C, J, D, V> Server<Candidate, C, J, D, V>
+impl<C, J, D, V, R> Server<Candidate, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Candidate timeout");
@@ -218,7 +220,7 @@ where
     pub(super) async fn run(
         self,
         next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<ElectionResult<C, J, D, V>, D, V> {
+    ) -> StateResult<ElectionResult<C, J, D, V, R>, D, V> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -246,14 +248,15 @@ where
     }
 }
 
-impl<C, J, D, V> From<Server<Follower, C, J, D, V>> for Server<Candidate, C, J, D, V>
+impl<C, J, D, V, R> From<Server<Follower, C, J, D, V, R>> for Server<Candidate, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    fn from(follower: Server<Follower, C, J, D, V>) -> Self {
+    fn from(follower: Server<Follower, C, J, D, V, R>) -> Self {
         let timeout = Self::generate_random_timeout(
             follower.config.election_timeout_min,
             follower.config.election_timeout_max,
@@ -267,6 +270,7 @@ where
             state: Candidate::new(timeout),
             state_tx: follower.state_tx,
             _snapshot: follower._snapshot,
+            _apply: follower._apply,
         }
     }
 }

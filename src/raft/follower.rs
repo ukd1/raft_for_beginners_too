@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, JournalEntry, Journalable},
+    journal::{Journal, JournalEntry, Journalable, ApplyResult},
 };
 
 #[derive(Debug)]
@@ -71,12 +71,13 @@ impl Ballot {
     }
 }
 
-impl<C, J, D, V> Server<Follower, C, J, D, V>
+impl<C, J, D, V, R> Server<Follower, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
     pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
         warn!("Follower timeout");
@@ -222,10 +223,10 @@ where
             if let Some(last_entry_index) = last_entry_index {
                 let commit_index = self.journal.commit_index();
                 if *leader_commit > commit_index {
-                    let prev_commit = commit_index.unwrap_or(0);
+                    let start_commit_range = commit_index.map_or(0, |i| i + 1);
                     let commit_index = std::cmp::min(leader_commit.unwrap(), last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    let (results_tx, results): (Vec<_>, Vec<_>) = (prev_commit..=commit_index).into_iter()
+                    let (results_tx, results): (Vec<_>, Vec<_>) = (start_commit_range..=commit_index).into_iter()
                         .map(|i| {
                             let (tx, rx) = oneshot::channel();
                             ((i, tx), (i, rx))
@@ -249,7 +250,7 @@ where
                             match result {
                                 Err(_) => error!(%index, "applying journal entry timed out"),
                                 Ok(Err(error)) => error!(%index, %error, "error applying journal entry"),
-                                Ok(Ok(result)) => debug!(?result, "successfully applied journal entry"),
+                                Ok(Ok(result)) => debug!(?result, "applied journal entry"),
                             }
                         }
                     }.instrument(info_span!("apply_committed_entries", %commit_index)));
@@ -276,19 +277,19 @@ where
     async fn run(
         self,
         handoff_packet: Option<Packet<D, V>>,
-    ) -> StateResult<Server<Candidate, C, J, D, V>, D, V> {
+    ) -> StateResult<Server<Candidate, C, J, D, V, R>, D, V> {
         let this = Arc::new(self);
         // Loop on incoming packets until a successful exit,
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         Ok((
-            Server::<Candidate, C, J, D, V>::from(this),
+            Server::<Candidate, C, J, D, V, R>::from(this),
             packet_for_candidate,
         ))
     }
 
-    pub fn start(connection: C, journal: J, config: crate::config::Config) -> ServerHandle<V> {
+    pub fn start(connection: C, journal: J, config: crate::config::Config) -> ServerHandle<V, R> {
         let timeout =
             Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);
@@ -304,6 +305,7 @@ where
                 state: Follower::new(timeout),
                 state_tx,
                 _snapshot: Default::default(),
+                _apply: Default::default(),
             };
             let mut packet = None;
             let mut candidate;
@@ -320,14 +322,15 @@ where
     }
 }
 
-impl<C, J, D, V> From<Server<Candidate, C, J, D, V>> for Server<Follower, C, J, D, V>
+impl<C, J, D, V, R> From<Server<Candidate, C, J, D, V, R>> for Server<Follower, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    fn from(candidate: Server<Candidate, C, J, D, V>) -> Self {
+    fn from(candidate: Server<Candidate, C, J, D, V, R>) -> Self {
         let timeout = Self::generate_random_timeout(
             candidate.config.election_timeout_min,
             candidate.config.election_timeout_max,
@@ -341,18 +344,20 @@ where
             state: Follower::new(timeout),
             state_tx: candidate.state_tx,
             _snapshot: candidate._snapshot,
+            _apply: candidate._apply,
         }
     }
 }
 
-impl<C, J, D, V> From<Server<Leader<V>, C, J, D, V>> for Server<Follower, C, J, D, V>
+impl<C, J, D, V, R> From<Server<Leader<V, R>, C, J, D, V, R>> for Server<Follower, C, J, D, V, R>
 where
     C: Connection<D, V>,
-    J: Journal<D, V>,
+    J: Journal<D, V, R>,
     D: Journalable,
     V: Journalable,
+    R: ApplyResult
 {
-    fn from(leader: Server<Leader<V>, C, J, D, V>) -> Self {
+    fn from(leader: Server<Leader<V, R>, C, J, D, V, R>) -> Self {
         let timeout = Self::generate_random_timeout(
             leader.config.election_timeout_min,
             leader.config.election_timeout_max,
@@ -366,6 +371,7 @@ where
             state: Follower::new(timeout),
             state_tx: leader.state_tx,
             _snapshot: leader._snapshot,
+            _apply: leader._apply,
         }
     }
 }
