@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    fmt::{Display, Debug},
+    fmt::{Debug, Display},
     sync::{atomic::Ordering, Arc, Mutex, RwLock},
 };
 
@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, Journalable, ApplyResult},
+    journal::{ApplyResult, Journal, JournalIndex, Journalable},
     raft::HandlePacketAction,
 };
 
@@ -21,17 +21,17 @@ use crate::{
 pub struct Leader<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     pub next_index: PeerIndices,
     pub match_index: PeerIndices,
-    pub requests: Mutex<VecDeque<(u64, ClientResultSender<V, R>)>>,
+    pub requests: Mutex<VecDeque<(JournalIndex, ClientResultSender<V, R>)>>,
 }
 
 impl<V, R> ServerState for Leader<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     fn get_timeout(&self) -> Option<Instant> {
         None
@@ -44,7 +44,7 @@ where
 impl<V, R> Display for Leader<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Leader")
@@ -52,22 +52,24 @@ where
 }
 
 #[derive(Debug)]
-pub struct PeerIndices(RwLock<HashMap<ServerAddress, Option<u64>>>);
+pub struct PeerIndices(RwLock<HashMap<ServerAddress, Option<JournalIndex>>>);
 
 impl PeerIndices {
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, Option<u64>>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<ServerAddress, Option<JournalIndex>>> {
         self.0.read().expect("PeerIndices lock was posioned")
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, Option<u64>>> {
+    fn write(
+        &self,
+    ) -> std::sync::RwLockWriteGuard<'_, HashMap<ServerAddress, Option<JournalIndex>>> {
         self.0.write().expect("PeerIndices lock was posioned")
     }
 
-    pub fn get(&self, peer: &ServerAddress) -> Option<u64> {
+    pub fn get(&self, peer: &ServerAddress) -> Option<JournalIndex> {
         self.read().get(peer).copied().flatten()
     }
 
-    pub fn set(&self, peer: &ServerAddress, index: Option<u64>) {
+    pub fn set(&self, peer: &ServerAddress, index: Option<JournalIndex>) {
         self.write().insert(peer.clone(), index);
     }
 
@@ -86,10 +88,10 @@ impl PeerIndices {
     ///
     /// Parameters:
     /// quorum - the number of nodes required to establish a majority
-    pub fn greatest_quorum_index(&self, quorum: usize) -> u64 {
+    pub fn greatest_quorum_index(&self, quorum: usize) -> JournalIndex {
         let map = self.read();
 
-        let mut index_counts: BTreeMap<u64, usize> = BTreeMap::new();
+        let mut index_counts: BTreeMap<JournalIndex, usize> = BTreeMap::new();
         for index in map.iter().filter_map(|(_, opt_i)| opt_i.as_ref()) {
             let count = index_counts
                 .entry(*index)
@@ -118,9 +120,9 @@ impl PeerIndices {
     }
 }
 
-impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
-    fn from_iter<T: IntoIterator<Item = (ServerAddress, Option<u64>)>>(iter: T) -> Self {
-        let inner: HashMap<ServerAddress, Option<u64>> = iter.into_iter().collect();
+impl FromIterator<(ServerAddress, Option<JournalIndex>)> for PeerIndices {
+    fn from_iter<T: IntoIterator<Item = (ServerAddress, Option<JournalIndex>)>>(iter: T) -> Self {
+        let inner: HashMap<ServerAddress, Option<JournalIndex>> = iter.into_iter().collect();
         Self(inner.into())
     }
 }
@@ -145,7 +147,11 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: J::Value, result_tx: ClientResultSender<J::Value, J::Applied>) {
+    pub async fn handle_clientrequest(
+        &self,
+        value: J::Value,
+        result_tx: ClientResultSender<J::Value, J::Applied>,
+    ) {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
@@ -192,11 +198,13 @@ where
                         let requests_to_commit: Vec<_> = {
                             let mut requests =
                                 self.state.requests.lock().expect("requests lock poisoned");
-                            let last_committed_request_index = requests.partition_point(|&(i, _)| i <= match_index);
+                            let last_committed_request_index =
+                                requests.partition_point(|&(i, _)| i <= match_index);
                             requests.drain(0..last_committed_request_index).collect()
                         };
 
-                        self.journal.commit_and_apply(match_index, requests_to_commit);
+                        self.journal
+                            .commit_and_apply(match_index, requests_to_commit);
                         debug!(commit_index = %match_index, "updated commit index");
                     }
                 }

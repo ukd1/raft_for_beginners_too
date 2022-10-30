@@ -5,19 +5,19 @@ use std::{
 };
 
 use tokio::{
-    sync::{mpsc, watch, oneshot},
+    sync::{mpsc, oneshot, watch},
     time::Instant,
 };
-use tracing::{debug, info, warn, error, info_span, Instrument};
+use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::{
     candidate::ElectionResult,
     state::{Candidate, CurrentState, Leader, ServerState},
-    HandlePacketAction, Result, Server, ServerHandle, StateResult,
+    HandlePacketAction, Result, Server, ServerHandle, StateResult, Term,
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::Journal,
+    journal::{Journal, JournalIndex},
 };
 
 #[derive(Debug)]
@@ -54,12 +54,12 @@ impl Follower {
 
 #[derive(Debug, Default)]
 pub struct Ballot {
-    term: u64,
+    term: Term,
     choice: Option<ServerAddress>,
 }
 
 impl Ballot {
-    pub fn cast_vote(&mut self, vote_term: u64, vote_choice: &ServerAddress) -> bool {
+    pub fn cast_vote(&mut self, vote_term: Term, vote_choice: &ServerAddress) -> bool {
         // If the term has changed or we haven't voted in this term
         if self.term != vote_term || self.choice.is_none() {
             self.term = vote_term;
@@ -76,7 +76,9 @@ where
     C: Connection<J::Snapshot, J::Value>,
     J: Journal,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
+    pub(super) async fn handle_timeout(
+        &self,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         warn!("Follower timeout");
         // Advance to Candidate state on timeout
         Ok(HandlePacketAction::ChangeState(None))
@@ -197,7 +199,7 @@ where
         let match_index = if ack {
             for (packet_entry_idx, packet_entry) in entries.iter().enumerate() {
                 let maybe_existing = prev_log_index
-                    .map(|prev_log_index| prev_log_index + (packet_entry_idx as u64) + 1)
+                    .map(|prev_log_index| prev_log_index + (packet_entry_idx as JournalIndex) + 1)
                     .and_then(|i| Some(i).zip(self.journal.get(i)));
 
                 if let Some((existing_entry_idx, existing_entry)) = maybe_existing {
@@ -223,7 +225,9 @@ where
                     let start_commit_range = commit_index.map_or(0, |i| i + 1);
                     let commit_index = std::cmp::min(leader_commit.unwrap(), last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    let (results_tx, results): (Vec<_>, Vec<_>) = (start_commit_range..=commit_index).into_iter()
+                    let (results_tx, results): (Vec<_>, Vec<_>) = (start_commit_range
+                        ..=commit_index)
+                        .into_iter()
                         .map(|i| {
                             let (tx, rx) = oneshot::channel();
                             ((i, tx), (i, rx))
@@ -231,26 +235,32 @@ where
                         .unzip();
                     self.journal.commit_and_apply(commit_index, results_tx);
                     let request_timeout = self.config.request_timeout;
-                    tokio::spawn(async move {
-                        use futures::future::join_all;
-                        use tokio::time::timeout;
+                    tokio::spawn(
+                        async move {
+                            use futures::future::join_all;
+                            use tokio::time::timeout;
 
-                        let (indices, receivers): (Vec<_>, Vec<_>) = results.into_iter().unzip();
-                        // Wrap each result receiver in a timeout
-                        let receivers = receivers.into_iter()
-                            .map(|r| timeout(request_timeout, r));
-                        // Await all results or timeouts
-                        let results = join_all(receivers).await;
-                        // Re-attach journal indices to results for logging
-                        let results = indices.into_iter().zip(results);
-                        for (index, result) in results {
-                            match result {
-                                Err(_) => error!(%index, "applying journal entry timed out"),
-                                Ok(Err(error)) => error!(%index, %error, "error applying journal entry"),
-                                Ok(Ok(result)) => debug!(?result, "applied journal entry"),
+                            let (indices, receivers): (Vec<_>, Vec<_>) =
+                                results.into_iter().unzip();
+                            // Wrap each result receiver in a timeout
+                            let receivers =
+                                receivers.into_iter().map(|r| timeout(request_timeout, r));
+                            // Await all results or timeouts
+                            let results = join_all(receivers).await;
+                            // Re-attach journal indices to results for logging
+                            let results = indices.into_iter().zip(results);
+                            for (index, result) in results {
+                                match result {
+                                    Err(_) => error!(%index, "applying journal entry timed out"),
+                                    Ok(Err(error)) => {
+                                        error!(%index, %error, "error applying journal entry")
+                                    }
+                                    Ok(Ok(result)) => debug!(?result, "applied journal entry"),
+                                }
                             }
                         }
-                    }.instrument(info_span!("apply_committed_entries", %commit_index)));
+                        .instrument(info_span!("apply_committed_entries", %commit_index)),
+                    );
                 }
             }
 
@@ -280,13 +290,14 @@ where
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((
-            Server::<Candidate, C, J>::from(this),
-            packet_for_candidate,
-        ))
+        Ok((Server::<Candidate, C, J>::from(this), packet_for_candidate))
     }
 
-    pub fn start(connection: C, journal: J, config: crate::config::Config) -> ServerHandle<J::Value, J::Applied> {
+    pub fn start(
+        connection: C,
+        journal: J,
+        config: crate::config::Config,
+    ) -> ServerHandle<J::Value, J::Applied> {
         let timeout =
             Self::generate_random_timeout(config.election_timeout_min, config.election_timeout_max);
         let (requests_tx, requests_rx) = mpsc::channel(64);

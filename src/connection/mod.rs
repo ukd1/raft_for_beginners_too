@@ -7,7 +7,10 @@ use derive_more::{From, FromStr};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 pub use self::udp::UdpConnection;
-use crate::journal::{JournalEntry, Journalable};
+use crate::{
+    journal::{JournalEntry, JournalIndex, Journalable},
+    raft::Term,
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Packet<D, V>
@@ -18,7 +21,7 @@ where
     #[serde(bound = "V: DeserializeOwned")]
     pub message_type: PacketType<D, V>,
     pub peer: ServerAddress,
-    pub term: u64,
+    pub term: Term,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -29,22 +32,22 @@ where
     V: Journalable,
 {
     VoteRequest {
-        last_log_index: Option<u64>,
-        last_log_term: u64,
+        last_log_index: Option<JournalIndex>,
+        last_log_term: Term,
     },
     VoteResponse {
         is_granted: bool,
     },
     AppendEntries {
-        prev_log_index: Option<u64>,
-        prev_log_term: u64,
+        prev_log_index: Option<JournalIndex>,
+        prev_log_term: Term,
         #[serde(bound = "V: DeserializeOwned")]
         entries: Vec<JournalEntry<D, V>>,
-        leader_commit: Option<u64>,
+        leader_commit: Option<JournalIndex>,
     },
     AppendEntriesAck {
         did_append: bool,
-        match_index: Option<u64>,
+        match_index: Option<JournalIndex>,
     },
 }
 

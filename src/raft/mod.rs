@@ -6,7 +6,7 @@ mod state;
 use std::any::Any;
 use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
 use std::{result::Result as StdResult, sync::Arc};
 
@@ -25,8 +25,10 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use self::state::{Candidate, CurrentState, Follower, Leader, ServerState};
 use crate::connection::{Connection, ConnectionError, Packet, ServerAddress};
-use crate::journal::{Journal, Journalable, ApplyResult};
+use crate::journal::{ApplyResult, Journal, Journalable};
 
+pub type Term = u32;
+pub type AtomicTerm = AtomicU32;
 pub type Result<T, V> = std::result::Result<T, ServerError<V>>;
 type StateResult<T, D, V> = Result<(T, Option<Packet<D, V>>), V>;
 type ClientResultSender<V, R> = oneshot::Sender<Result<R, V>>;
@@ -36,7 +38,7 @@ type ClientRequest<V, R> = (V, ClientResultSender<V, R>);
 pub struct ServerHandle<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     #[pin]
     inner: Option<JoinHandle<Result<(), V>>>,
@@ -49,7 +51,7 @@ where
 impl<V, R> ServerHandle<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     fn new(
         inner: JoinHandle<Result<(), V>>,
@@ -75,8 +77,7 @@ where
         let result = timeout(self.timeout, result_rx)
             .await?
             .or(Err(ServerError::RequestFailed))?;
-        result
-            .map_err(|e| ServerError::RequestError(Box::new(e)))
+        result.map_err(|e| ServerError::RequestError(Box::new(e)))
     }
 
     pub async fn state_change(&self) -> CurrentState {
@@ -90,7 +91,7 @@ where
 impl<V, R> Future for ServerHandle<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     type Output = <JoinHandle<Result<(), V>> as Future>::Output;
 
@@ -108,7 +109,7 @@ where
 impl<V, R> Clone for ServerHandle<V, R>
 where
     V: Journalable,
-    R: ApplyResult
+    R: ApplyResult,
 {
     fn clone(&self) -> Self {
         Self {
@@ -156,7 +157,7 @@ where
     journal: J,
     pub state: S,
     state_tx: watch::Sender<CurrentState>,
-    pub term: AtomicU64,
+    pub term: AtomicTerm,
 }
 
 enum ServerImpl<'s, C, J>
@@ -183,7 +184,10 @@ where
     C: Connection<J::Snapshot, J::Value>,
     J: Journal,
 {
-    pub async fn handle_packet(&self, packet: Packet<J::Snapshot, J::Value>) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
+    pub async fn handle_packet(
+        &self,
+        packet: Packet<J::Snapshot, J::Value>,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         match self {
             ServerImpl::Follower(f) => f.handle_packet(packet).await,
             ServerImpl::Candidate(c) => c.handle_packet(packet).await,
@@ -191,7 +195,9 @@ where
         }
     }
 
-    pub async fn handle_timeout(&self) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
+    pub async fn handle_timeout(
+        &self,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         match self {
             ServerImpl::Follower(f) => f.handle_timeout().await,
             ServerImpl::Candidate(c) => c.handle_timeout().await,
@@ -199,7 +205,11 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: J::Value, result_tx: ClientResultSender<J::Value, J::Applied>) {
+    pub async fn handle_clientrequest(
+        &self,
+        value: J::Value,
+        result_tx: ClientResultSender<J::Value, J::Applied>,
+    ) {
         let send_result = match self {
             ServerImpl::Follower(f) => result_tx.send(Err(
                 match &*f.state.leader.lock().expect("leader lock poisoned") {
@@ -255,7 +265,7 @@ where
         self.state.set_timeout(new_timeout);
     }
 
-    async fn update_term(&self, packet: &Packet<J::Snapshot, J::Value>) -> StdResult<u64, u64> {
+    async fn update_term(&self, packet: &Packet<J::Snapshot, J::Value>) -> StdResult<Term, Term> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term > current_term {
             info!(%packet.term, "newer term in packet");
@@ -285,7 +295,9 @@ where
             ServerImpl::Follower(follower)
         } else if let Some(candidate) = dyn_self.downcast_ref::<Server<Candidate, C, J>>() {
             ServerImpl::Candidate(candidate)
-        } else if let Some(leader) = dyn_self.downcast_ref::<Server<Leader<J::Value, J::Applied>, C, J>>() {
+        } else if let Some(leader) =
+            dyn_self.downcast_ref::<Server<Leader<J::Value, J::Applied>, C, J>>()
+        {
             ServerImpl::Leader(leader)
         } else {
             unimplemented!("Invalid server state: {}", self.state);
@@ -300,7 +312,11 @@ where
         ),
     )]
 
-    async fn handle_request_downcast(&self, value: J::Value, result_tx: ClientResultSender<J::Value, J::Applied>) {
+    async fn handle_request_downcast(
+        &self,
+        value: J::Value,
+        result_tx: ClientResultSender<J::Value, J::Applied>,
+    ) {
         self.downcast().handle_clientrequest(value, result_tx).await;
     }
 
@@ -349,7 +365,9 @@ where
             state = %self.state,
         ),
     )]
-    async fn handle_timeout_downcast(&self) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
+    async fn handle_timeout_downcast(
+        &self,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         use HandlePacketAction::*;
 
         let mut action = self.downcast().handle_timeout().await?;

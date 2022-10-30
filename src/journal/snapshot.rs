@@ -6,10 +6,7 @@ use super::Journalable;
 
 pub trait ApplyResult: Debug + Send + Sync + 'static {}
 
-impl<T> ApplyResult for T
-where
-    T: Debug + Send + Sync + 'static
-{}
+impl<T> ApplyResult for T where T: Debug + Send + Sync + 'static {}
 
 #[async_trait]
 pub trait Snapshot: Debug + Send + Sync + 'static {

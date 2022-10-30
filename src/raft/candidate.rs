@@ -89,7 +89,9 @@ where
     C: Connection<J::Snapshot, J::Value>,
     J: Journal,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
+    pub(super) async fn handle_timeout(
+        &self,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;

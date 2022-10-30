@@ -5,11 +5,12 @@ use std::fmt::{Debug, Display};
 
 use async_trait::async_trait;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::sync::{watch, oneshot};
-
-use crate::raft::Result;
+use tokio::sync::{oneshot, watch};
 
 pub use self::snapshot::ApplyResult;
+use crate::raft::{Result, Term};
+
+pub type JournalIndex = u32;
 
 #[async_trait]
 pub trait Journal
@@ -51,15 +52,25 @@ where
     type Applied: ApplyResult;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn append_entry(&self, entry: JournalEntry<Self::Snapshot, Self::Value>) -> u64;
-    fn append(&self, term: u64, value: Self::Value) -> u64;
-    fn truncate(&self, index: u64);
-    fn get(&self, index: u64) -> Option<JournalEntry<Self::Snapshot, Self::Value>>;
-    fn last_index(&self) -> Option<u64>;
-    fn commit_index(&self) -> Option<u64>;
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<Self::Applied, Self::Value>>)>);
+    fn append_entry(&self, entry: JournalEntry<Self::Snapshot, Self::Value>) -> JournalIndex;
+    fn append(&self, term: Term, value: Self::Value) -> JournalIndex;
+    fn truncate(&self, index: JournalIndex);
+    fn get(&self, index: JournalIndex) -> Option<JournalEntry<Self::Snapshot, Self::Value>>;
+    fn last_index(&self) -> Option<JournalIndex>;
+    fn commit_index(&self) -> Option<JournalIndex>;
+    fn commit_and_apply(
+        &self,
+        index: JournalIndex,
+        results: impl IntoIterator<
+            Item = (
+                JournalIndex,
+                oneshot::Sender<Result<Self::Applied, Self::Value>>,
+            ),
+        >,
+    );
     async fn snapshot_without_commit(&self) -> Result<Self::Snapshot, Self::Value>;
-    fn get_update(&self, index: Option<u64>) -> JournalUpdate<Self::Snapshot, Self::Value>;
+    fn get_update(&self, index: Option<JournalIndex>)
+        -> JournalUpdate<Self::Snapshot, Self::Value>;
     fn subscribe(&self) -> watch::Receiver<()>;
 }
 
@@ -69,7 +80,7 @@ where
     D: Journalable,
     V: Journalable,
 {
-    pub term: u64, // TODO make these a u32
+    pub term: Term, // TODO make these a u32
     #[serde(bound = "V: DeserializeOwned")]
     pub value: JournalEntryType<D, V>,
 }
@@ -101,10 +112,10 @@ where
     D: Journalable,
     V: Journalable,
 {
-    pub prev_term: u64,          // TODO make these a u32
-    pub prev_index: Option<u64>, // TODO make these a u32
+    pub prev_term: Term, // TODO make these a u32
+    pub prev_index: Option<JournalIndex>,
     pub entries: Vec<JournalEntry<D, V>>,
-    pub commit_index: Option<u64>, // TODO make these a u32
+    pub commit_index: Option<JournalIndex>,
 }
 
 /* TODO: re-enable after Journal<V> refactor

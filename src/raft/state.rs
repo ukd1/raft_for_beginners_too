@@ -7,10 +7,7 @@ use tokio::time::Instant;
 
 use super::ServerImpl;
 pub use super::{candidate::Candidate, follower::Follower, leader::Leader};
-use crate::{
-    connection::Connection,
-    journal::Journal,
-};
+use crate::{connection::Connection, journal::Journal};
 
 pub trait ServerState: Debug + Display + Any + Send + Sync {
     fn get_timeout(&self) -> Option<Instant>;

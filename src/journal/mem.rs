@@ -2,22 +2,22 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::marker::PhantomData;
 use std::result::Result as StdResult;
-use std::sync::{Mutex, Arc};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     RwLock,
 };
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::sync::watch;
-use tracing::{trace, warn, error};
-
-use crate::ServerError;
-use crate::raft::Result;
+use tracing::{error, trace, warn};
 
 use super::snapshot::Snapshot;
 use super::{Journal, JournalEntry, JournalEntryType, JournalUpdate, Journalable};
+use crate::journal::JournalIndex;
+use crate::raft::{Result, Term};
+use crate::ServerError;
 
 #[derive(Debug)]
 pub struct VecJournal<W>
@@ -69,63 +69,78 @@ where
     type Snapshot = W::Snapshot;
     type Error = W::Error;
 
-    fn append_entry(&self, entry: JournalEntry<W::Snapshot, W::Entry>) -> u64 {
+    fn append_entry(&self, entry: JournalEntry<W::Snapshot, W::Entry>) -> JournalIndex {
         let mut entries = self.write();
         entries.push(entry);
         let last_index = entries.len() - 1;
-        last_index.try_into().expect("journal.len() overflowed u64")
+        last_index
+            .try_into()
+            .expect("journal.len() overflowed JournalIndex")
     }
 
     /// Append a command to the journal
     ///
     /// Returns: index of the appended entry
-    fn append(&self, term: u64, value: W::Entry) -> u64 {
+    fn append(&self, term: Term, value: W::Entry) -> JournalIndex {
         let mut entries = self.write();
         entries.push(crate::journal::JournalEntry {
             term,
             value: JournalEntryType::Value(value),
         });
         let last_index = entries.len() - 1;
-        last_index.try_into().expect("journal.len() overflowed u64")
+        last_index
+            .try_into()
+            .expect("journal.len() overflowed JournalIndex")
     }
 
-    fn truncate(&self, index: u64) {
+    fn truncate(&self, index: JournalIndex) {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.write().truncate(index);
     }
 
-    fn get(&self, index: u64) -> Option<JournalEntry<W::Snapshot, W::Entry>> {
+    fn get(&self, index: JournalIndex) -> Option<JournalEntry<W::Snapshot, W::Entry>> {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.read().get(index).cloned()
     }
 
     // lastApplied
-    fn last_index(&self) -> Option<u64> {
+    fn last_index(&self) -> Option<JournalIndex> {
         let len = self.read().len();
         let last_index = if len > 0 {
             len - 1
         } else {
             return None;
         };
-        let last_index = last_index.try_into().expect("journal.len() overflowed u64");
+        let last_index = last_index
+            .try_into()
+            .expect("journal.len() overflowed JournalIndex");
         Some(last_index)
     }
 
-    fn commit_index(&self) -> Option<u64> {
+    fn commit_index(&self) -> Option<JournalIndex> {
         let has_entries = self.has_commits.load(Ordering::Acquire);
         has_entries.then(|| {
             self.commit_index
                 .load(Ordering::Acquire)
                 .try_into()
-                .expect("commit_index overflowed u64")
+                .expect("commit_index overflowed JournalIndex")
         })
     }
 
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<Self::Applied, W::Entry>>)>) {
+    fn commit_and_apply(
+        &self,
+        index: JournalIndex,
+        results: impl IntoIterator<
+            Item = (
+                JournalIndex,
+                tokio::sync::oneshot::Sender<Result<Self::Applied, W::Entry>>,
+            ),
+        >,
+    ) {
         let commit_index: usize = index.try_into().expect("index overflowed usize");
-        let begin_apply_range = self.set_commit_index(commit_index)
-            .map_or(0, |i| i + 1);
-        let committed_entries: Vec<_> = self.read()[begin_apply_range..=commit_index].iter()
+        let begin_apply_range = self.set_commit_index(commit_index).map_or(0, |i| i + 1);
+        let committed_entries: Vec<_> = self.read()[begin_apply_range..=commit_index]
+            .iter()
             // Enumerate and index using original index
             .enumerate()
             .map(|(offset, entry)| (begin_apply_range + offset, entry))
@@ -136,13 +151,16 @@ where
             })
             .collect();
 
-        let mut results: HashMap<usize, _> = results.into_iter()
+        let mut results: HashMap<usize, _> = results
+            .into_iter()
             .map(|(i, r)| (i.try_into().expect("index overflowed usize"), r))
             .collect();
         let apply_storage = Arc::clone(&self.storage);
         tokio::spawn(async move {
             for (index, entry) in committed_entries {
-                let result = apply_storage.apply_entry(entry).await
+                let result = apply_storage
+                    .apply_entry(entry)
+                    .await
                     .map_err(|e| ServerError::RequestError(Box::new(e)));
                 if let Some(sender) = results.remove(&index) {
                     let send_result = sender.send(result);
@@ -155,11 +173,13 @@ where
     }
 
     async fn snapshot_without_commit(&self) -> Result<W::Snapshot, W::Entry> {
-        self.storage.snapshot().await
+        self.storage
+            .snapshot()
+            .await
             .map_err(|e| ServerError::RequestError(Box::new(e)))
     }
 
-    fn get_update(&self, index: Option<u64>) -> JournalUpdate<W::Snapshot, W::Entry> {
+    fn get_update(&self, index: Option<JournalIndex>) -> JournalUpdate<W::Snapshot, W::Entry> {
         let entries = self.read();
 
         let index = index.map(|i| usize::try_from(i).expect("index overflowed usize"));
@@ -178,7 +198,7 @@ where
         };
 
         // Adapted from TLA+ spec: https://github.com/ongardie/raft.tla/blob/974fff7236545912c035ff8041582864449d0ffe/raft.tla#L222
-        let last_index = <u64>::try_from(entries.len())
+        let last_index = JournalIndex::try_from(entries.len())
             .expect("journal length overflowed")
             .checked_sub(1);
         let commit_index = std::cmp::min(last_index, self.commit_index());
@@ -193,7 +213,8 @@ where
 
         JournalUpdate {
             prev_term: prev_term.unwrap_or(0),
-            prev_index: prev_index.map(|i| i.try_into().expect("prev_index overflowed u64")),
+            prev_index: prev_index
+                .map(|i| i.try_into().expect("prev_index overflowed JournalIndex")),
             entries: update_entries,
             commit_index,
         }
@@ -238,7 +259,7 @@ pub struct MemValue<D: Journalable, V: Journalable> {
 #[async_trait]
 impl<V> Snapshot for MemValue<V, V>
 where
-    V: Journalable + Clone
+    V: Journalable + Clone,
 {
     type Entry = V;
     type Snapshot = V;
