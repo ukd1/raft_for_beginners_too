@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, Journalable, ApplyResult},
+    journal::Journal,
 };
 
 #[derive(Debug)]
@@ -75,27 +75,21 @@ impl Default for ElectionTally {
     }
 }
 
-pub enum ElectionResult<C, J, D, V, R>
+pub enum ElectionResult<C, J>
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
-    Follower(Server<Follower, C, J, D, V, R>),
-    Leader(Server<Leader<V, R>, C, J, D, V, R>),
+    Follower(Server<Follower, C, J>),
+    Leader(Server<Leader<J::Value, J::Applied>, C, J>),
 }
 
-impl<C, J, D, V, R> Server<Candidate, C, J, D, V, R>
+impl<C, J> Server<Candidate, C, J>
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
-    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<D, V>, V> {
+    pub(super) async fn handle_timeout(&self) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         warn!("Candidate timeout");
         // Restart election and maintain state on timeout
         self.start_election().await?;
@@ -104,8 +98,8 @@ where
 
     pub(super) async fn handle_packet(
         &self,
-        packet: Packet<D, V>,
-    ) -> Result<HandlePacketAction<D, V>, V> {
+        packet: Packet<J::Snapshot, J::Value>,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         use PacketType::*;
 
         match packet.message_type {
@@ -132,8 +126,8 @@ where
 
     async fn handle_voteresponse(
         &self,
-        packet: &Packet<D, V>,
-    ) -> Result<HandlePacketAction<D, V>, V> {
+        packet: &Packet<J::Snapshot, J::Value>,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         let current_term = self.term.load(Ordering::Acquire);
         if packet.term != current_term {
             warn!(?packet.peer, ?packet.term, "got a vote response for the wrong term");
@@ -175,7 +169,7 @@ where
         vote_cnt >= quorum
     }
 
-    async fn start_election(&self) -> Result<(), V> {
+    async fn start_election(&self) -> Result<(), J::Value> {
         let current_term = self.term.fetch_add(1, Ordering::Release) + 1;
         // There is a bug in tracing_subscriber that causes the
         // term field to be logged twice when an election timeout
@@ -219,8 +213,8 @@ where
     )]
     pub(super) async fn run(
         self,
-        next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<ElectionResult<C, J, D, V, R>, D, V> {
+        next_packet: Option<Packet<J::Snapshot, J::Value>>,
+    ) -> StateResult<ElectionResult<C, J>, J::Snapshot, J::Value> {
         let this = Arc::new(self);
         let packet_for_next_state = {
             // Loop on incoming packets until a successful exit, and...
@@ -248,15 +242,12 @@ where
     }
 }
 
-impl<C, J, D, V, R> From<Server<Follower, C, J, D, V, R>> for Server<Candidate, C, J, D, V, R>
+impl<C, J> From<Server<Follower, C, J>> for Server<Candidate, C, J>
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
-    fn from(follower: Server<Follower, C, J, D, V, R>) -> Self {
+    fn from(follower: Server<Follower, C, J>) -> Self {
         let timeout = Self::generate_random_timeout(
             follower.config.election_timeout_min,
             follower.config.election_timeout_max,
@@ -269,8 +260,6 @@ where
             journal: follower.journal,
             state: Candidate::new(timeout),
             state_tx: follower.state_tx,
-            _snapshot: follower._snapshot,
-            _apply: follower._apply,
         }
     }
 }

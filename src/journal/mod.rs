@@ -12,24 +12,54 @@ use crate::raft::Result;
 pub use self::snapshot::ApplyResult;
 
 #[async_trait]
-pub trait Journal<D, V, R>
+pub trait Journal
 where
     Self: Debug + Display + Send + Sync + 'static,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult,
 {
+    // It would be simpler here to have:
+    // ```
+    // type Storage: Snapshot;
+    // ```
+    //
+    // Then, use `Self::Storage::Value`, `Self::Storage::Applied`, etc.
+    // throughout. As of Rust 1.64.0, this isn't possible and results
+    // in an "ambiguous associated type" error. The workaround is to
+    // use `<Self::Storage as Snapshot>::Value`. This would be fine
+    // if the associated types were used only in the trait function
+    // signatures, but the implementation of `Server` uses these associated
+    // types extensively. Sprinkling fully-qualified syntax everywhere
+    // would make the `Server` code less readable. The related issue is
+    // https://github.com/rust-lang/rust/issues/38078.
+    //
+    // So, instead of having an associated type with a `Snapshot` bound
+    // here, implementers of `Journal` (such as `mem::VecJournal`) may
+    // use the `Snapshot` trait to make themselves generic over a storage
+    // adapter (that provides entry applying and snapshotting functions).
+    // Then, the `impl Journal` block passes through the associated types
+    // from the `Snapshot`-implementing adapter, e.g.:
+    // ```
+    // impl Journal for SomeJournal<W: Snapshot> {
+    //     type Value = W::Value;
+    //     type Snapshot = W::Snapshot;
+    //     type Applied = W::Applied;
+    //     ...
+    // }
+    // ```
+    //
+    type Value: Journalable;
+    type Snapshot: Journalable;
+    type Applied: ApplyResult;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn append_entry(&self, entry: JournalEntry<D, V>) -> u64;
-    fn append(&self, term: u64, value: V) -> u64;
+    fn append_entry(&self, entry: JournalEntry<Self::Snapshot, Self::Value>) -> u64;
+    fn append(&self, term: u64, value: Self::Value) -> u64;
     fn truncate(&self, index: u64);
-    fn get(&self, index: u64) -> Option<JournalEntry<D, V>>;
+    fn get(&self, index: u64) -> Option<JournalEntry<Self::Snapshot, Self::Value>>;
     fn last_index(&self) -> Option<u64>;
     fn commit_index(&self) -> Option<u64>;
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<R, V>>)>);
-    async fn snapshot_without_commit(&self) -> Result<D, V>;
-    fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V>;
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, oneshot::Sender<Result<Self::Applied, Self::Value>>)>);
+    async fn snapshot_without_commit(&self) -> Result<Self::Snapshot, Self::Value>;
+    fn get_update(&self, index: Option<u64>) -> JournalUpdate<Self::Snapshot, Self::Value>;
     fn subscribe(&self) -> watch::Receiver<()>;
 }
 

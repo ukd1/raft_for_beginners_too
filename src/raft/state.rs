@@ -9,7 +9,7 @@ use super::ServerImpl;
 pub use super::{candidate::Candidate, follower::Follower, leader::Leader};
 use crate::{
     connection::Connection,
-    journal::{Journal, Journalable, ApplyResult},
+    journal::Journal,
 };
 
 pub trait ServerState: Debug + Display + Any + Send + Sync {
@@ -24,15 +24,12 @@ pub enum CurrentState {
     Leader,
 }
 
-impl<'s, C, J, D, V, R> From<ServerImpl<'s, C, J, D, V, R>> for CurrentState
+impl<'s, C, J> From<ServerImpl<'s, C, J>> for CurrentState
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
-    fn from(server: ServerImpl<'s, C, J, D, V, R>) -> Self {
+    fn from(server: ServerImpl<'s, C, J>) -> Self {
         use ServerImpl::*;
 
         match server {

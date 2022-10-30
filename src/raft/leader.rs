@@ -125,18 +125,15 @@ impl FromIterator<(ServerAddress, Option<u64>)> for PeerIndices {
     }
 }
 
-impl<C, J, D, V, R> Server<Leader<V, R>, C, J, D, V, R>
+impl<C, J> Server<Leader<J::Value, J::Applied>, C, J>
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
     pub(super) async fn handle_packet(
         &self,
-        packet: Packet<D, V>,
-    ) -> Result<HandlePacketAction<D, V>, V> {
+        packet: Packet<J::Snapshot, J::Value>,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         use PacketType::*;
 
         match packet.message_type {
@@ -148,7 +145,7 @@ where
         }
     }
 
-    pub async fn handle_clientrequest(&self, value: V, result_tx: ClientResultSender<V, R>) {
+    pub async fn handle_clientrequest(&self, value: J::Value, result_tx: ClientResultSender<J::Value, J::Applied>) {
         let current_term = self.term.load(Ordering::SeqCst);
         let index = self.journal.append(current_term, value);
         // Setting match_index for the leader so that quorum
@@ -165,8 +162,8 @@ where
 
     async fn handle_appendentriesack(
         &self,
-        packet: &Packet<D, V>,
-    ) -> Result<HandlePacketAction<D, V>, V> {
+        packet: &Packet<J::Snapshot, J::Value>,
+    ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         // TODO: this is messy, and could be simplified into an Ack/Nack enum or by
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
@@ -218,8 +215,8 @@ where
 
     pub(super) async fn run(
         self,
-        next_packet: Option<Packet<D, V>>,
-    ) -> StateResult<Server<Follower, C, J, D, V, R>, D, V> {
+        next_packet: Option<Packet<J::Snapshot, J::Value>>,
+    ) -> StateResult<Server<Follower, C, J>, J::Snapshot, J::Value> {
         let this = Arc::new(self);
 
         let heartbeat_handle = tokio::spawn(Arc::clone(&this).heartbeat_loop());
@@ -239,7 +236,7 @@ where
         Ok((this.into(), packet_for_next_state))
     }
 
-    async fn heartbeat_loop(self: Arc<Self>) -> Result<(), V> {
+    async fn heartbeat_loop(self: Arc<Self>) -> Result<(), J::Value> {
         let heartbeat_interval = self.config.heartbeat_interval;
         let mut journal_changes = self.journal.subscribe();
 
@@ -277,15 +274,12 @@ where
     }
 }
 
-impl<C, J, D, V, R> From<Server<Candidate, C, J, D, V, R>> for Server<Leader<V, R>, C, J, D, V, R>
+impl<C, J> From<Server<Candidate, C, J>> for Server<Leader<J::Value, J::Applied>, C, J>
 where
-    C: Connection<D, V>,
-    J: Journal<D, V, R>,
-    D: Journalable,
-    V: Journalable,
-    R: ApplyResult
+    C: Connection<J::Snapshot, J::Value>,
+    J: Journal,
 {
-    fn from(candidate: Server<Candidate, C, J, D, V, R>) -> Self {
+    fn from(candidate: Server<Candidate, C, J>) -> Self {
         // figure out match index
         let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
         let next_index: PeerIndices = candidate
@@ -313,8 +307,6 @@ where
                 requests: Default::default(),
             },
             state_tx: candidate.state_tx,
-            _snapshot: candidate._snapshot,
-            _apply: candidate._apply,
         }
     }
 }

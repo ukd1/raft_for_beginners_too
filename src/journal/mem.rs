@@ -16,34 +16,30 @@ use tracing::{trace, warn, error};
 use crate::ServerError;
 use crate::raft::Result;
 
-use super::snapshot::{ApplyEntry, Snapshot};
-use super::{Journal, JournalEntry, JournalEntryType, JournalUpdate, Journalable, ApplyResult};
+use super::snapshot::Snapshot;
+use super::{Journal, JournalEntry, JournalEntryType, JournalUpdate, Journalable};
 
 #[derive(Debug)]
-pub struct VecJournal<D, V, W>
+pub struct VecJournal<W>
 where
-    D: Journalable,
-    V: Journalable,
-    W: ApplyEntry<V> + Snapshot<D>,
+    W: Snapshot,
 {
-    pub(crate) entries: RwLock<Vec<JournalEntry<D, V>>>,
+    pub(crate) entries: RwLock<Vec<JournalEntry<W::Snapshot, W::Entry>>>,
     pub(crate) commit_index: AtomicUsize,
     pub(crate) has_commits: AtomicBool,
     pub(crate) change_sender: watch::Sender<()>,
     storage: Arc<W>,
 }
 
-impl<D, V, W> VecJournal<D, V, W>
+impl<W> VecJournal<W>
 where
-    D: Journalable,
-    V: Journalable,
-    W: ApplyEntry<V> + Snapshot<D>,
+    W: Snapshot,
 {
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<D, V>>> {
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, Vec<JournalEntry<W::Snapshot, W::Entry>>> {
         self.entries.read().expect("Journal lock was posioned")
     }
 
-    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<JournalEntry<D, V>>> {
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, Vec<JournalEntry<W::Snapshot, W::Entry>>> {
         self.entries.write().expect("Journal lock was posioned")
     }
 
@@ -64,16 +60,16 @@ where
 }
 
 #[async_trait]
-impl<D, V, R, W> Journal<D, V, R> for VecJournal<D, V, W>
+impl<W> Journal for VecJournal<W>
 where
-    D: Journalable,
-    V: Journalable,
-    W: ApplyEntry<V, Ok = R> + Snapshot<D>,
-    R: ApplyResult,
+    W: Snapshot,
 {
-    type Error = <W as ApplyEntry<V>>::Error;
+    type Applied = W::Applied;
+    type Value = W::Entry;
+    type Snapshot = W::Snapshot;
+    type Error = W::Error;
 
-    fn append_entry(&self, entry: JournalEntry<D, V>) -> u64 {
+    fn append_entry(&self, entry: JournalEntry<W::Snapshot, W::Entry>) -> u64 {
         let mut entries = self.write();
         entries.push(entry);
         let last_index = entries.len() - 1;
@@ -83,7 +79,7 @@ where
     /// Append a command to the journal
     ///
     /// Returns: index of the appended entry
-    fn append(&self, term: u64, value: V) -> u64 {
+    fn append(&self, term: u64, value: W::Entry) -> u64 {
         let mut entries = self.write();
         entries.push(crate::journal::JournalEntry {
             term,
@@ -98,7 +94,7 @@ where
         self.write().truncate(index);
     }
 
-    fn get(&self, index: u64) -> Option<JournalEntry<D, V>> {
+    fn get(&self, index: u64) -> Option<JournalEntry<W::Snapshot, W::Entry>> {
         let index: usize = index.try_into().expect("index overflowed usize");
         self.read().get(index).cloned()
     }
@@ -125,7 +121,7 @@ where
         })
     }
 
-    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<R, V>>)>) {
+    fn commit_and_apply(&self, index: u64, results: impl IntoIterator<Item = (u64, tokio::sync::oneshot::Sender<Result<Self::Applied, W::Entry>>)>) {
         let commit_index: usize = index.try_into().expect("index overflowed usize");
         let begin_apply_range = self.set_commit_index(commit_index)
             .map_or(0, |i| i + 1);
@@ -146,7 +142,7 @@ where
         let apply_storage = Arc::clone(&self.storage);
         tokio::spawn(async move {
             for (index, entry) in committed_entries {
-                let result = apply_storage.apply(entry).await
+                let result = apply_storage.apply_entry(entry).await
                     .map_err(|e| ServerError::RequestError(Box::new(e)));
                 if let Some(sender) = results.remove(&index) {
                     let send_result = sender.send(result);
@@ -158,12 +154,12 @@ where
         });
     }
 
-    async fn snapshot_without_commit(&self) -> Result<D, V> {
+    async fn snapshot_without_commit(&self) -> Result<W::Snapshot, W::Entry> {
         self.storage.snapshot().await
             .map_err(|e| ServerError::RequestError(Box::new(e)))
     }
 
-    fn get_update(&self, index: Option<u64>) -> JournalUpdate<D, V> {
+    fn get_update(&self, index: Option<u64>) -> JournalUpdate<W::Snapshot, W::Entry> {
         let entries = self.read();
 
         let index = index.map(|i| usize::try_from(i).expect("index overflowed usize"));
@@ -208,18 +204,16 @@ where
     }
 }
 
-impl<D, V, W> Display for VecJournal<D, V, W>
+impl<W> Display for VecJournal<W>
 where
-    D: Journalable,
-    V: Journalable,
-    W: ApplyEntry<V> + Snapshot<D>,
+    W: Snapshot,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:#?}", self)
     }
 }
 
-impl<V> Default for VecJournal<V, V, MemValue<V, V>>
+impl<V> Default for VecJournal<MemValue<V, V>>
 where
     V: Journalable + Default,
 {
@@ -242,30 +236,27 @@ pub struct MemValue<D: Journalable, V: Journalable> {
 }
 
 #[async_trait]
-impl<V: Journalable> ApplyEntry<V> for MemValue<V, V> {
-    type Ok = ();
-    type Error = std::convert::Infallible;
-
-    async fn apply(&self, entry: V) -> StdResult<Self::Ok, Self::Error> {
-        *self.value.lock().expect("MemValue lock poisoned") = Some(entry);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl<V> Snapshot<V> for MemValue<V, V>
+impl<V> Snapshot for MemValue<V, V>
 where
     V: Journalable + Clone
 {
+    type Entry = V;
+    type Snapshot = V;
+    type Applied = ();
     type Error = MemValueError;
 
-    async fn snapshot(&self) -> StdResult<V, Self::Error> {
+    async fn apply_entry(&self, entry: Self::Entry) -> StdResult<Self::Applied, Self::Error> {
+        *self.value.lock().expect("MemValue lock poisoned") = Some(entry);
+        Ok(())
+    }
+
+    async fn snapshot(&self) -> StdResult<Self::Snapshot, Self::Error> {
         let value = self.value.lock().expect("MemValue lock poisoned");
         let value = value.clone().ok_or(MemValueError::Uninitialized)?;
         Ok(value)
     }
 
-    async fn restore(&self, snapshot: V) -> StdResult<(), Self::Error> {
+    async fn restore(&self, snapshot: Self::Snapshot) -> StdResult<(), Self::Error> {
         *self.value.lock().expect("MemValue lock poisoned") = Some(snapshot);
         Ok(())
     }
