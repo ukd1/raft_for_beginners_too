@@ -80,7 +80,8 @@ where
     D: Journalable,
     V: Journalable,
 {
-    pub term: Term, // TODO make these a u32
+    pub index: JournalIndex,
+    pub term: Term,
     #[serde(bound = "V: DeserializeOwned")]
     pub value: JournalEntryType<D, V>,
 }
@@ -112,7 +113,7 @@ where
     D: Journalable,
     V: Journalable,
 {
-    pub prev_term: Term, // TODO make these a u32
+    pub prev_term: Term,
     pub prev_index: Option<JournalIndex>,
     pub entries: Vec<JournalEntry<D, V>>,
     pub commit_index: Option<JournalIndex>,

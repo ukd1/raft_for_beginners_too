@@ -83,14 +83,15 @@ where
     /// Returns: index of the appended entry
     fn append(&self, term: Term, value: W::Entry) -> JournalIndex {
         let mut entries = self.write();
+        let next_index = entries.last()
+            .map_or(0, |e| e.index + 1);
         entries.push(crate::journal::JournalEntry {
+            index: next_index,
             term,
             value: JournalEntryType::Value(value),
         });
-        let last_index = entries.len() - 1;
-        last_index
-            .try_into()
-            .expect("journal.len() overflowed JournalIndex")
+
+        next_index
     }
 
     fn truncate(&self, index: JournalIndex) {
