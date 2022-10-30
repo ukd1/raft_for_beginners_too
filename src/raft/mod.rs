@@ -5,7 +5,6 @@ mod state;
 
 use std::any::Any;
 use std::future::Future;
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::Poll;
 use std::{result::Result as StdResult, sync::Arc};
@@ -45,7 +44,6 @@ where
     requests: mpsc::Sender<ClientRequest<V, R>>,
     state: watch::Receiver<CurrentState>,
     timeout: Duration,
-    _send_ok: PhantomData<R>,
 }
 
 impl<V, R> ServerHandle<V, R>
@@ -64,7 +62,6 @@ where
             requests,
             state,
             timeout,
-            _send_ok: Default::default(),
         }
     }
 
@@ -117,7 +114,6 @@ where
             requests: self.requests.clone(),
             state: self.state.clone(),
             timeout: self.timeout,
-            _send_ok: self._send_ok,
         }
     }
 }

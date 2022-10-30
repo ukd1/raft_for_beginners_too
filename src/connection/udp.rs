@@ -7,10 +7,13 @@ use tracing::trace;
 use super::*;
 
 #[derive(Debug)]
-pub struct UdpConnection<D, V> {
+pub struct UdpConnection<D, V> where
+    D: Journalable,
+    V: Journalable,
+{
     socket: UdpSocket,
-    _snapshot: PhantomData<D>,
-    _value: PhantomData<V>,
+    _send: PhantomData<fn(Packet<D, V>)>,
+    _receive: PhantomData<fn() -> Packet<D, V>>,
 }
 
 #[async_trait]
@@ -24,8 +27,8 @@ where
         let socket = UdpSocket::bind(bind_socket.0).await?;
         Ok(Self {
             socket,
-            _snapshot: Default::default(),
-            _value: Default::default(),
+            _send: Default::default(),
+            _receive: Default::default(),
         })
     }
 
