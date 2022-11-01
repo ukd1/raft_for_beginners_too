@@ -253,7 +253,7 @@ where
                     let request_timeout = self.config.request_timeout;
                     tokio::spawn(
                         async move {
-                            use futures::future::join_all;
+                            use futures_util::future::join_all;
                             use tokio::time::timeout;
 
                             let (indices, receivers): (Vec<_>, Vec<_>) =

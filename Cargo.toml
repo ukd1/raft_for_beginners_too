@@ -9,12 +9,12 @@ edition = "2021"
 async-trait = "0.1.57"
 clap = { version = "3", features = ["derive"] }
 derive_more = "0.99.17"
-futures = { version = "0.3.25", default-features = false, features = ["std"] }
+futures-util = { version = "0.3.25", default-features = false, features = ["std"] }
 pin-project = "1.0.12"
 rand = "0.8.5"
 rmp-serde = "1.1.1"
 serde = { version = "1.0.145", features = ["derive"] }
 thiserror = "1.0.37"
-tokio = { version = "1.21.2", features = ["full"] }
+tokio = { version = "1.21.2", features = ["rt-multi-thread", "net", "time", "macros", "sync", "signal", "io-std", "io-util"] }
 tracing = "0.1.37"
 tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
