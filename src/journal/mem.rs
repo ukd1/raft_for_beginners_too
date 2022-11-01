@@ -18,7 +18,7 @@ use super::{Journal, JournalEntry, JournalEntryType, JournalIndex, JournalUpdate
 use crate::raft::{Result, Term};
 use crate::ServerError;
 
-const ENTRY_COMPACTION_THRESHOLD: usize = 5;
+const DEFAULT_ENTRY_COMPACTION_THRESHOLD: usize = 100;
 
 type EntryVec<W> = Vec<JournalEntry<<W as Snapshot>::Snapshot, <W as Snapshot>::Entry>>;
 type SnapshotTask<W> = JoinHandle<StdResult<<W as Snapshot>::Snapshot, <W as Snapshot>::Error>>;
@@ -45,6 +45,19 @@ impl<W> VecJournal<W>
 where
     W: Snapshot,
 {
+    pub fn new(storage: W, compaction_threshold: usize) -> Self {
+        let (sender, _) = watch::channel(());
+        Self {
+            entries: RwLock::new(Vec::new()),
+            commit_offset: 0.into(),
+            has_commits: false.into(),
+            change_sender: sender,
+            storage: storage.into(),
+            snapshot_task: Default::default(),
+            compaction_threshold,
+        }
+    }
+
     fn set_commit_offset(&self, offset: usize) -> Option<usize> {
         debug!(%offset, "setting commit offset");
         let prev_commit = self.commit_offset.swap(offset, Ordering::Release);
@@ -458,7 +471,7 @@ where
             change_sender: sender,
             storage: MemValue::default().into(),
             snapshot_task: Default::default(),
-            compaction_threshold: ENTRY_COMPACTION_THRESHOLD,
+            compaction_threshold: DEFAULT_ENTRY_COMPACTION_THRESHOLD,
         }
     }
 }
