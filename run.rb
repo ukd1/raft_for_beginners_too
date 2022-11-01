@@ -20,7 +20,7 @@ puts "tmux set -g history-limit 100000"
     log_env = "RUST_LOG=#{log_level}".shellescape
     tmux_session = "raft_for_beginners_too:$".shellescape
 
-        puts "tmux new-window -a -t #{tmux_session} -n #{this_node} -e #{log_env} #{shell_loop}"
+        puts "tmux new-window -a -t #{tmux_session} -n #{this_node} -e RUST_BACKTRACE=1 -e #{log_env} #{shell_loop}"
     peers.rotate!
 end
 

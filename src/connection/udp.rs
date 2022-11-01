@@ -7,7 +7,8 @@ use tracing::trace;
 use super::*;
 
 #[derive(Debug)]
-pub struct UdpConnection<D, V> where
+pub struct UdpConnection<D, V>
+where
     D: Journalable,
     V: Journalable,
 {

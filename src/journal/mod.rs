@@ -52,25 +52,33 @@ where
     type Applied: ApplyResult;
     type Error: std::error::Error + Send + Sync + 'static;
 
-    fn append_entry(&self, entry: JournalEntry<Self::Snapshot, Self::Value>) -> JournalIndex;
-    fn append(&self, term: Term, value: Self::Value) -> JournalIndex;
-    fn truncate(&self, index: JournalIndex);
-    fn get(&self, index: JournalIndex) -> Option<JournalEntry<Self::Snapshot, Self::Value>>;
-    fn last_index(&self) -> Option<JournalIndex>;
-    fn commit_index(&self) -> Option<JournalIndex>;
-    fn commit_and_apply(
+    async fn append_entry(&self, entry: JournalEntry<Self::Snapshot, Self::Value>) -> JournalIndex;
+    async fn append(&self, term: Term, value: Self::Value) -> JournalIndex;
+    async fn truncate(&self, index: JournalIndex);
+    async fn indices_in_range(
+        &self,
+        start_inclusive: JournalIndex,
+        end_inclusive: JournalIndex,
+    ) -> Vec<JournalIndex>;
+    async fn get(&self, index: JournalIndex) -> Option<JournalEntry<Self::Snapshot, Self::Value>>;
+    async fn last_index(&self) -> Option<JournalIndex>;
+    async fn commit_index(&self) -> Option<JournalIndex>;
+    async fn commit_and_apply(
         &self,
         index: JournalIndex,
         results: impl IntoIterator<
-            Item = (
-                JournalIndex,
-                oneshot::Sender<Result<Self::Applied, Self::Value>>,
-            ),
-        >,
+                Item = (
+                    JournalIndex,
+                    oneshot::Sender<Result<Self::Applied, Self::Value>>,
+                ),
+            > + Send,
     );
+    // TODO: remove after testing
     async fn snapshot_without_commit(&self) -> Result<Self::Snapshot, Self::Value>;
-    fn get_update(&self, index: Option<JournalIndex>)
-        -> JournalUpdate<Self::Snapshot, Self::Value>;
+    async fn get_update(
+        &self,
+        index: Option<JournalIndex>,
+    ) -> JournalUpdate<Self::Snapshot, Self::Value>;
     fn subscribe(&self) -> watch::Receiver<()>;
 }
 
@@ -86,6 +94,16 @@ where
     pub value: JournalEntryType<D, V>,
 }
 
+impl<D, V> JournalEntry<D, V>
+where
+    D: Journalable,
+    V: Journalable,
+{
+    pub fn is_snapshot(&self) -> bool {
+        matches!(self.value, JournalEntryType::Snapshot(_))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum JournalEntryType<D, V>
 where
@@ -96,6 +114,7 @@ where
     Snapshot(D),
     #[serde(bound = "V: DeserializeOwned")]
     Value(V),
+    Snapshotting,
 }
 
 pub trait Journalable:

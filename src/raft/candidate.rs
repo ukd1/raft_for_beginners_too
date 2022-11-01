@@ -8,6 +8,7 @@ use tokio::time::Instant;
 use tracing::{debug, field, info, trace, warn, Instrument, Span};
 
 use super::{
+    leader::PeerIndices,
     state::{Follower, Leader, ServerState},
     HandlePacketAction, Result, Server, StateResult,
 };
@@ -181,11 +182,12 @@ where
         // to the log line for... reasons. See:
         // https://github.com/tokio-rs/tracing/issues/2334
         Span::current().record("term", current_term);
-        let last_log_index = self.journal.last_index();
-        let last_log_term = last_log_index
-            .and_then(|i| self.journal.get(i))
-            .map(|e| e.term)
-            .unwrap_or(0);
+        let last_log_index = self.journal.last_index().await;
+        let last_log_term = match last_log_index {
+            Some(i) => self.journal.get(i).await.map(|e| e.term),
+            None => None,
+        }
+        .unwrap_or(0);
 
         self.reset_term_timeout().await;
         info!("starting new election");
@@ -236,32 +238,57 @@ where
         };
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
         let next_state = if this.has_won_election() {
-            ElectionResult::Leader(this.into())
+            ElectionResult::Leader(this.into_leader().await)
         } else {
-            ElectionResult::Follower(this.into())
+            ElectionResult::Follower(this.into_follower())
         };
         Ok((next_state, packet_for_next_state))
     }
-}
 
-impl<C, J> From<Server<Follower, C, J>> for Server<Candidate, C, J>
-where
-    C: Connection<J::Snapshot, J::Value>,
-    J: Journal,
-{
-    fn from(follower: Server<Follower, C, J>) -> Self {
+    async fn into_leader(self) -> Server<Leader<J::Value, J::Applied>, C, J> {
+        // figure out match index
+        let journal_next_index = self.journal.last_index().await.map(|i| i + 1).unwrap_or(0);
+        let next_index: PeerIndices = self
+            .config
+            .peers
+            .iter()
+            .map(|p| (p.to_owned(), Some(journal_next_index)))
+            .collect();
+        let match_index: PeerIndices = self
+            .config
+            .peers
+            .iter()
+            .map(|p| (p.to_owned(), None))
+            .collect();
+
+        Server {
+            connection: self.connection,
+            requests: self.requests,
+            config: self.config,
+            term: self.term,
+            journal: self.journal,
+            state: Leader {
+                next_index,
+                match_index,
+                requests: Default::default(),
+            },
+            state_tx: self.state_tx,
+        }
+    }
+
+    fn into_follower(self) -> Server<Follower, C, J> {
         let timeout = Self::generate_random_timeout(
-            follower.config.election_timeout_min,
-            follower.config.election_timeout_max,
+            self.config.election_timeout_min,
+            self.config.election_timeout_max,
         );
-        Self {
-            connection: follower.connection,
-            requests: follower.requests,
-            config: follower.config,
-            term: follower.term,
-            journal: follower.journal,
-            state: Candidate::new(timeout),
-            state_tx: follower.state_tx,
+        Server {
+            connection: self.connection,
+            requests: self.requests,
+            config: self.config,
+            term: self.term,
+            journal: self.journal,
+            state: Follower::new(timeout),
+            state_tx: self.state_tx,
         }
     }
 }

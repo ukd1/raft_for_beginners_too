@@ -1,14 +1,15 @@
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     fmt::{Debug, Display},
-    sync::{atomic::Ordering, Arc, Mutex, RwLock},
+    sync::{atomic::Ordering, Arc, RwLock},
 };
 
+use tokio::sync::Mutex;
 use tokio::time::{timeout, Instant};
 use tracing::{debug, trace};
 
 use super::{
-    state::{Candidate, Follower, ServerState},
+    state::{Follower, ServerState},
     ClientResultSender, Result, Server, StateResult,
 };
 use crate::{
@@ -153,14 +154,14 @@ where
         result_tx: ClientResultSender<J::Value, J::Applied>,
     ) {
         let current_term = self.term.load(Ordering::SeqCst);
-        let index = self.journal.append(current_term, value);
+        let index = self.journal.append(current_term, value).await;
         // Setting match_index for the leader so that quorum
         // is counted correctly; next_index just to be correct
         let leader_addr = self.connection.address();
         self.state.next_index.set(&leader_addr, Some(index + 1));
         self.state.match_index.set(&leader_addr, Some(index));
         {
-            let mut requests = self.state.requests.lock().expect("requests lock poisoned");
+            let mut requests = self.state.requests.lock().await;
             requests.push_back((index, result_tx));
             trace!(%index, "added client response sender to requests queue");
         }
@@ -174,6 +175,7 @@ where
         // removing did_append and using Some/None as the boolean
         match packet.message_type {
             PacketType::AppendEntriesAck { did_append, .. } if !did_append => {
+                trace!(peer = ?packet.peer, "AppendEntriesAck !did_append"); // DEBUG
                 self.state.next_index.decrement(&packet.peer);
             }
             PacketType::AppendEntriesAck {
@@ -183,7 +185,7 @@ where
                 let next_index = match_index.map_or(0, |i| i + 1);
                 self.state.next_index.set(&packet.peer, Some(next_index));
                 self.state.match_index.set(&packet.peer, match_index);
-                let commit_index = self.journal.commit_index();
+                let commit_index = self.journal.commit_index().await;
                 // Using the following match_index == commit_index == 0 logic
                 // instead of using an Option<u64> for the commit_index, because
                 // it allows us to use atomics inside journal instead of locking
@@ -192,19 +194,20 @@ where
                     let quorum = self.quorum();
                     let quorum_index = self.state.match_index.greatest_quorum_index(quorum);
                     let current_term = self.term.load(Ordering::Acquire);
-                    let match_index_term = self.journal.get(match_index).map_or(0, |e| e.term);
+                    let match_index_term =
+                        self.journal.get(match_index).await.map_or(0, |e| e.term);
                     trace!(%quorum, %quorum_index, %current_term, %match_index_term, "checking commit index quorum");
                     if match_index <= quorum_index && match_index_term == current_term {
                         let requests_to_commit: Vec<_> = {
-                            let mut requests =
-                                self.state.requests.lock().expect("requests lock poisoned");
+                            let mut requests = self.state.requests.lock().await;
                             let last_committed_request_index =
                                 requests.partition_point(|&(i, _)| i <= match_index);
                             requests.drain(0..last_committed_request_index).collect()
                         };
 
                         self.journal
-                            .commit_and_apply(match_index, requests_to_commit);
+                            .commit_and_apply(match_index, requests_to_commit)
+                            .await;
                         debug!(commit_index = %match_index, "updated commit index");
                     }
                 }
@@ -241,7 +244,7 @@ where
             _ => {} // Either exited normally or was cancelled
         }
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((this.into(), packet_for_next_state))
+        Ok((this.into_follower(), packet_for_next_state))
     }
 
     async fn heartbeat_loop(self: Arc<Self>) -> Result<(), J::Value> {
@@ -261,10 +264,15 @@ where
             }
             for peer in &self.config.peers {
                 let peer_next_index = self.state.next_index.get(peer);
-                // let peer_update = self.journal.get_update(peer_next_index);
-                let peer_update = update_cache
-                    .entry(peer_next_index)
-                    .or_insert_with(|| self.journal.get_update(peer_next_index));
+                trace!(?peer, next_index = ?peer_next_index, "getting update for peer"); // DEBUG
+                let peer_update = match update_cache.get(&peer_next_index) {
+                    Some(u) => u,
+                    None => {
+                        let update = self.journal.get_update(peer_next_index).await;
+                        update_cache.insert(peer_next_index, update);
+                        update_cache.get(&peer_next_index).unwrap()
+                    }
+                };
                 let heartbeat = PacketType::AppendEntries {
                     prev_log_index: peer_update.prev_index,
                     prev_log_term: peer_update.prev_term,
@@ -280,41 +288,20 @@ where
             }
         }
     }
-}
 
-impl<C, J> From<Server<Candidate, C, J>> for Server<Leader<J::Value, J::Applied>, C, J>
-where
-    C: Connection<J::Snapshot, J::Value>,
-    J: Journal,
-{
-    fn from(candidate: Server<Candidate, C, J>) -> Self {
-        // figure out match index
-        let journal_next_index = candidate.journal.last_index().map(|i| i + 1).unwrap_or(0);
-        let next_index: PeerIndices = candidate
-            .config
-            .peers
-            .iter()
-            .map(|p| (p.to_owned(), Some(journal_next_index)))
-            .collect();
-        let match_index: PeerIndices = candidate
-            .config
-            .peers
-            .iter()
-            .map(|p| (p.to_owned(), None))
-            .collect();
-
-        Self {
-            connection: candidate.connection,
-            requests: candidate.requests,
-            config: candidate.config,
-            term: candidate.term,
-            journal: candidate.journal,
-            state: Leader {
-                next_index,
-                match_index,
-                requests: Default::default(),
-            },
-            state_tx: candidate.state_tx,
+    fn into_follower(self) -> Server<Follower, C, J> {
+        let timeout = Self::generate_random_timeout(
+            self.config.election_timeout_min,
+            self.config.election_timeout_max,
+        );
+        Server {
+            connection: self.connection,
+            requests: self.requests,
+            config: self.config,
+            term: self.term,
+            journal: self.journal,
+            state: Follower::new(timeout),
+            state_tx: self.state_tx,
         }
     }
 }

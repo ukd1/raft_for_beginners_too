@@ -12,12 +12,12 @@ use tracing::{debug, error, info, info_span, warn, Instrument};
 
 use super::{
     candidate::ElectionResult,
-    state::{Candidate, CurrentState, Leader, ServerState},
+    state::{Candidate, CurrentState, ServerState},
     HandlePacketAction, Result, Server, ServerHandle, StateResult, Term,
 };
 use crate::{
     connection::{Connection, Packet, PacketType, ServerAddress},
-    journal::{Journal, JournalIndex},
+    journal::Journal,
 };
 
 #[derive(Debug)]
@@ -91,8 +91,8 @@ where
         use PacketType::*;
 
         match packet.message_type {
-            VoteRequest { .. } => self.handle_voterequest(&packet).await,
-            AppendEntries { .. } => self.handle_appendentries(&packet).await,
+            VoteRequest { .. } => self.handle_voterequest(packet).await,
+            AppendEntries { .. } => self.handle_appendentries(packet).await,
             // Followers ignore these packets
             AppendEntriesAck { .. } | VoteResponse { .. } => {
                 Ok(HandlePacketAction::MaintainState(None))
@@ -102,19 +102,19 @@ where
 
     async fn handle_voterequest(
         &self,
-        packet: &Packet<J::Snapshot, J::Value>,
+        packet: Packet<J::Snapshot, J::Value>,
     ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         let current_term = self.term.load(Ordering::Acquire);
-        let (candidate_last_log_index, candidate_last_log_term) = match &packet.message_type {
+        let (candidate_last_log_index, candidate_last_log_term) = match packet.message_type {
             PacketType::VoteRequest {
                 last_log_index,
                 last_log_term,
-            } => (*last_log_index, *last_log_term),
+            } => (last_log_index, last_log_term),
             _ => unreachable!("handle_voterequest called with non-PacketType::VoteRequest"),
         };
 
         let vote_granted = if packet.term == current_term {
-            let our_last_log_index = self.journal.last_index();
+            let our_last_log_index = self.journal.last_index().await;
             let candidate_log_valid = match candidate_last_log_index.cmp(&our_last_log_index) {
                 // Candidate log is more up-to-date than ours
                 cmp::Ordering::Greater => true,
@@ -123,12 +123,15 @@ where
                 // Candidate log is equally up-to-date as ours, so verify terms match;
                 // if both terms are None, then they match without checking the journal,
                 // because both Candidate and Follower journals are empty
-                cmp::Ordering::Equal => candidate_last_log_index.map_or(true, |i| {
-                    self.journal
+                cmp::Ordering::Equal => match candidate_last_log_index {
+                    None => true,
+                    Some(i) => self
+                        .journal
                         .get(i)
+                        .await
                         .filter(|e| e.term == candidate_last_log_term)
-                        .is_some()
-                }),
+                        .is_some(),
+                },
             };
 
             if candidate_log_valid {
@@ -165,17 +168,17 @@ where
 
     async fn handle_appendentries(
         &self,
-        packet: &Packet<J::Snapshot, J::Value>,
+        packet: Packet<J::Snapshot, J::Value>,
     ) -> Result<HandlePacketAction<J::Snapshot, J::Value>, J::Value> {
         let current_term = self.term.load(Ordering::Acquire);
 
-        let (prev_log_index, prev_log_term, entries, leader_commit) = match &packet.message_type {
+        let (prev_log_index, prev_log_term, entries, leader_commit) = match packet.message_type {
             PacketType::AppendEntries {
                 prev_log_index,
                 prev_log_term,
                 entries,
                 leader_commit,
-            } => (*prev_log_index, prev_log_term, entries, leader_commit),
+            } => (prev_log_index, prev_log_term, entries, leader_commit),
             _ => unreachable!("handle_appendentries called with non-PacketType::AppendEntries"),
         };
 
@@ -190,50 +193,63 @@ where
             Some(index) => self
                 .journal
                 .get(index)
-                .filter(|e| e.term == *prev_log_term)
+                .await
+                .filter(|e| e.term == prev_log_term)
                 .is_some(),
         };
 
         let ack = term_matches && prev_log_matches;
 
         let match_index = if ack {
-            for (packet_entry_idx, packet_entry) in entries.iter().enumerate() {
-                let maybe_existing = prev_log_index
-                    .map(|prev_log_index| prev_log_index + (packet_entry_idx as JournalIndex) + 1)
-                    .and_then(|i| Some(i).zip(self.journal.get(i)));
+            //
+            // Remove any Snapshotting in-progress entries that came over from the leader.
+            // It's less intensive to remove them here than on the leader, because the follower
+            // is already iterating over each entry. The Snapshotting entry is just a bookmark
+            // for the results of an in-progress snapshot operation on the leader, and all the
+            // un-compacted entries the follower needs to catch up will have preceded it.
+            //
+            let appendable_entries = entries
+                .into_iter()
+                .filter(|e| !matches!(e.value, crate::journal::JournalEntryType::Snapshotting));
+            for packet_entry in appendable_entries {
+                let maybe_existing = self.journal.get(packet_entry.index).await;
 
-                if let Some((existing_entry_idx, existing_entry)) = maybe_existing {
+                if let Some(existing_entry) = maybe_existing {
                     // 3. If an existing entry conflicts with a new one (same index but different terms)
                     if existing_entry.term != packet_entry.term {
                         // delete all delete the existing entry and all that follow it (§5.3)
-                        self.journal.truncate(existing_entry_idx);
-                        warn!(last_index = %existing_entry_idx, "truncated journal");
+                        warn!(last_index = %existing_entry.index, "truncated journal");
+                        self.journal.truncate(existing_entry.index).await;
                         break;
                     }
                 } else {
                     // 4. Append any new entries not already in the logs
-                    let new_entry_idx = self.journal.append_entry(packet_entry.clone());
-                    debug!(index = %new_entry_idx, ?packet_entry, "appended entry to journal");
+                    let new_entry_idx = self.journal.append_entry(packet_entry).await;
+                    debug!(index = %new_entry_idx, "appended entry to journal");
                 }
             }
 
             // 5. If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
-            let last_entry_index = self.journal.last_index();
+            let last_entry_index = self.journal.last_index().await;
             if let Some(last_entry_index) = last_entry_index {
-                let commit_index = self.journal.commit_index();
-                if *leader_commit > commit_index {
+                let commit_index = self.journal.commit_index().await;
+                if leader_commit > commit_index {
                     let start_commit_range = commit_index.map_or(0, |i| i + 1);
                     let commit_index = std::cmp::min(leader_commit.unwrap(), last_entry_index);
                     debug!(%commit_index, "updating commit index");
-                    let (results_tx, results): (Vec<_>, Vec<_>) = (start_commit_range
-                        ..=commit_index)
+                    let (results_tx, results): (Vec<_>, Vec<_>) = self
+                        .journal
+                        .indices_in_range(start_commit_range, commit_index)
+                        .await
                         .into_iter()
                         .map(|i| {
                             let (tx, rx) = oneshot::channel();
                             ((i, tx), (i, rx))
                         })
                         .unzip();
-                    self.journal.commit_and_apply(commit_index, results_tx);
+                    self.journal
+                        .commit_and_apply(commit_index, results_tx)
+                        .await;
                     let request_timeout = self.config.request_timeout;
                     tokio::spawn(
                         async move {
@@ -255,7 +271,9 @@ where
                                     Ok(Err(error)) => {
                                         error!(%index, %error, "error applying journal entry")
                                     }
-                                    Ok(Ok(result)) => debug!(?result, "applied journal entry"),
+                                    Ok(Ok(result)) => {
+                                        debug!(%index, ?result, "applied journal entry")
+                                    }
                                 }
                             }
                         }
@@ -290,7 +308,7 @@ where
         // propagating any errors
         let packet_for_candidate = tokio::spawn(Arc::clone(&this).main(handoff_packet)).await??;
         let this = Arc::try_unwrap(this).expect("should have exclusive ownership here");
-        Ok((Server::<Candidate, C, J>::from(this), packet_for_candidate))
+        Ok((this.into_candidate(), packet_for_candidate))
     }
 
     pub fn start(
@@ -326,48 +344,20 @@ where
         });
         ServerHandle::new(join_h, requests_tx, state_rx, handle_timeout)
     }
-}
 
-impl<C, J> From<Server<Candidate, C, J>> for Server<Follower, C, J>
-where
-    C: Connection<J::Snapshot, J::Value>,
-    J: Journal,
-{
-    fn from(candidate: Server<Candidate, C, J>) -> Self {
+    fn into_candidate(self) -> Server<Candidate, C, J> {
         let timeout = Self::generate_random_timeout(
-            candidate.config.election_timeout_min,
-            candidate.config.election_timeout_max,
+            self.config.election_timeout_min,
+            self.config.election_timeout_max,
         );
-        Self {
-            connection: candidate.connection,
-            requests: candidate.requests,
-            config: candidate.config,
-            term: candidate.term,
-            journal: candidate.journal,
-            state: Follower::new(timeout),
-            state_tx: candidate.state_tx,
-        }
-    }
-}
-
-impl<C, J> From<Server<Leader<J::Value, J::Applied>, C, J>> for Server<Follower, C, J>
-where
-    C: Connection<J::Snapshot, J::Value>,
-    J: Journal,
-{
-    fn from(leader: Server<Leader<J::Value, J::Applied>, C, J>) -> Self {
-        let timeout = Self::generate_random_timeout(
-            leader.config.election_timeout_min,
-            leader.config.election_timeout_max,
-        );
-        Self {
-            connection: leader.connection,
-            requests: leader.requests,
-            config: leader.config,
-            term: leader.term,
-            journal: leader.journal,
-            state: Follower::new(timeout),
-            state_tx: leader.state_tx,
+        Server {
+            connection: self.connection,
+            requests: self.requests,
+            config: self.config,
+            term: self.term,
+            journal: self.journal,
+            state: Candidate::new(timeout),
+            state_tx: self.state_tx,
         }
     }
 }

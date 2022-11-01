@@ -69,9 +69,9 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync + 'static>> {
     //
     // END DEBUG
     //
-    let server_result = tokio::select! {
+    tokio::select! {
         res = server_handle => res?,
         res = test_request_handle => res?,
     }?;
-    Ok(server_result)
+    Ok(())
 }
